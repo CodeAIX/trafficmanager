@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+data/
+data-test/
+*.pyc
+3x-ui Fleet Traffic Manager V1 — Codex 构建实施规格.md

@@ -1,0 +1,16 @@
+services:
+  trafficmanager:
+    build:
+      context: .
+    image: trafficmanager:latest
+    container_name: trafficmanager
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      APP_MASTER_KEY: ${APP_MASTER_KEY:-}
+      APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SESSION_SECURE: ${SESSION_SECURE:-false}
+    restart: unless-stopped
