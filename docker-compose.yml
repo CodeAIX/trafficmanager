@@ -5,7 +5,7 @@ services:
     image: trafficmanager:latest
     container_name: trafficmanager
     ports:
-      - "2096:2096"
+      - "2083:2083"
     volumes:
       - ./data:/data
     environment:

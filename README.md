@@ -30,7 +30,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Open `http://SERVER:2096`. The first page requires creation of an administrator; there is no default password.
+Open `http://SERVER:2083`. The first page requires creation of an administrator; there is no default password.
 
 ## 使用方法
 
@@ -58,7 +58,7 @@ chmod 600 master-key.txt
 ```bash
 docker run -d \
   --name trafficmanager \
-  -p 2096:2096 \
+  -p 2083:2083 \
   -e APP_MASTER_KEY="$(cat master-key.txt)" \
   -e APP_TIMEZONE=Asia/Shanghai \
   -e LOG_LEVEL=INFO \
@@ -67,14 +67,14 @@ docker run -d \
   ghcr.io/codeaix/trafficmanager:latest
 ```
 
-打开 `http://服务器IP:2096` 创建首个管理员，然后进入 **Nodes → Add node** 添加 3x-ui 节点。Base URL 必须保留 3x-ui 的 WebBasePath，例如 `https://host:2053/abcdef`。
+打开 `http://服务器IP:2083` 创建首个管理员，然后进入 **Nodes → Add node** 添加 3x-ui 节点。Base URL 必须保留 3x-ui 的 WebBasePath，例如 `https://host:2053/abcdef`。
 
 查看状态与日志：
 
 ```bash
 docker ps --filter name=trafficmanager
 docker logs -f trafficmanager
-curl http://127.0.0.1:2096/health
+curl http://127.0.0.1:2083/health
 ```
 
 更新镜像：
@@ -105,7 +105,7 @@ Build without Compose:
 
 ```bash
 docker build -t trafficmanager:latest .
-docker run -d --name trafficmanager -p 2096:2096 \
+docker run -d --name trafficmanager -p 2083:2083 \
   -e APP_MASTER_KEY='YOUR_BASE64_KEY' \
   -v trafficmanager-data:/data \
   --restart unless-stopped \
@@ -209,7 +209,7 @@ The mock 3x-ui app covers bearer authentication, OpenAPI discovery, large counte
 - Node bearer tokens use AES-256-GCM and API responses expose only `tokenConfigured`.
 - Remote UUIDs, passwords, private keys, and full client payloads are not persisted.
 - Keep TLS verification enabled and terminate TrafficManager itself behind HTTPS before setting `SESSION_SECURE=true`.
-- Do not expose port 2096 directly to the Internet without HTTPS and appropriate network controls.
+- Do not expose port 2083 directly to the Internet without HTTPS and appropriate network controls.
 
 ## Troubleshooting
 
@@ -217,7 +217,7 @@ The mock 3x-ui app covers bearer authentication, OpenAPI discovery, large counte
 - **Endpoint unsupported:** inspect the node's authenticated `/panel/api/openapi.json`; capability detection, not a version comparison, selects behavior.
 - **Node offline/stale:** verify DNS, port, WebBasePath, TLS trust, and outbound access from the container. Last known state is retained.
 - **Saved tokens cannot decrypt:** restore the original master key. Ciphertext cannot be recovered without it.
-- **Container unhealthy:** run `docker logs trafficmanager` and `curl http://127.0.0.1:2096/health`; also verify `/data` is writable by the container.
+- **Container unhealthy:** run `docker logs trafficmanager` and `curl http://127.0.0.1:2083/health`; also verify `/data` is writable by the container.
 - **Duplicate monthly run:** inspect Jobs; the database uniqueness constraint rejects a second job for the same policy cycle.
 
 ## Known V1 limitations
