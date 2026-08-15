@@ -32,12 +32,9 @@ async def test_auth_error_not_retried():
 
 
 @pytest.mark.asyncio
-async def test_read_modify_write_preserves_secret_and_verify_reset():
+async def test_reset_and_verify_preserves_quota():
     transport = httpx.ASGITransport(app=create_mock())
     adapter = ModernThreeXUIAdapter("http://mock/base", "test-token", transport=transport)
-    updated = await adapter.update_client_quota("user@example.com", 2**42)
-    assert updated["id"] == "secret-not-persisted"
     await adapter.reset_client_traffic("user@example.com")
-    assert (await adapter.verify_client("user@example.com", 2**42))["verified"]
+    assert (await adapter.verify_client("user@example.com", 2**40))["verified"]
     await adapter.close()
-

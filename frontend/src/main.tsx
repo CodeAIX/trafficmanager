@@ -206,7 +206,6 @@ function Clients() {
   const [executing, setExecuting] = useState(false)
   const [configuring, setConfiguring] = useState<any | null>(null)
   const [configSaving, setConfigSaving] = useState(false)
-  const [quotaSyncing, setQuotaSyncing] = useState<number | null>(null)
   const [clientPolicyForm] = Form.useForm()
   const selectedClients = useMemo(() => data.filter((client: any) => selected.includes(client.id)), [data, selected])
   const blocked = selectedClients.filter((client: any) => client.managed_mode !== 'MANAGED')
@@ -297,12 +296,10 @@ function Clients() {
   const openClientPolicy = (client: any) => {
     const config = client.policy_config || {}
     clientPolicyForm.setFieldsValue({
-      quota_gib: config.quota_bytes == null ? (client.quota_bytes ? client.quota_bytes / 1073741824 : null) : config.quota_bytes / 1073741824,
       reset_enabled: config.reset_enabled ?? true,
       monthly_day: config.monthly_day ?? 1,
       local_time: config.local_time ?? '00:00',
       timezone: config.timezone ?? 'Asia/Shanghai',
-      sync_after_save: client.managed_mode === 'MANAGED',
     })
     setConfiguring(client)
   }
@@ -314,42 +311,19 @@ function Clients() {
       await api(`/api/clients/${configuring.id}/dedicated-policy`, {
         method: 'PUT',
         body: JSON.stringify({
-          quota_bytes: values.quota_gib == null ? null : Math.round(Number(values.quota_gib) * 1073741824),
           reset_enabled: values.reset_enabled ?? true,
           monthly_day: values.monthly_day,
           local_time: values.local_time,
           timezone: values.timezone,
         }),
       })
-      let quotaSynced = false
-      if (values.sync_after_save) {
-        try {
-          await api(`/api/clients/${configuring.id}/sync-quota`, { method: 'POST' })
-          quotaSynced = true
-        } catch (error) {
-          message.warning(`专属策略已保存，但配额同步失败：${errorText(error)}`)
-        }
-      }
-      if (!values.sync_after_save || quotaSynced) message.success(quotaSynced ? `${configuring.email} 的专属策略已保存，配额已同步到源节点` : `${configuring.email} 的专属配额和重置周期已保存`)
+      message.success(`${configuring.email} 的专属重置周期已保存`)
       setConfiguring(null)
       await Promise.all([qc.invalidateQueries({ queryKey: ['clients'] }), qc.invalidateQueries({ queryKey: ['policies'] }), qc.invalidateQueries({ queryKey: ['dashboard'] })])
     } catch (error) {
       message.error(`客户端配置保存失败：${errorText(error)}`)
     } finally {
       setConfigSaving(false)
-    }
-  }
-
-  const syncQuota = async (client: any) => {
-    setQuotaSyncing(client.id)
-    try {
-      await api(`/api/clients/${client.id}/sync-quota`, { method: 'POST' })
-      message.success(`${client.email} 的配额已同步到源 3x-ui，现有流量未重置`)
-      await Promise.all([qc.invalidateQueries({ queryKey: ['clients'] }), qc.invalidateQueries({ queryKey: ['audit'] })])
-    } catch (error) {
-      message.error(`配额同步失败：${errorText(error)}`)
-    } finally {
-      setQuotaSyncing(null)
     }
   }
 
@@ -379,12 +353,12 @@ function Clients() {
         { title: '入站', dataIndex: 'inbounds', sorter: (left, right) => compareText(left.inbounds?.map((item: any) => item.remark).join('、'), right.inbounds?.map((item: any) => item.remark).join('、')), render: value => value.map((item: any) => item.remark || item.remote_id).join('、') },
         { title: '管理模式', dataIndex: 'managed_mode', sorter: textSorter('managed_mode'), render: (value, row: any) => <Select value={value} style={{ width: 120 }} options={['MANAGED', 'OBSERVE', 'IGNORE'].map(item => ({ value: item, label: modeLabels[item] }))} onChange={mode => changeMode(row, mode)} /> },
         { title: '已用流量', dataIndex: 'used_bytes', sorter: numberSorter('used_bytes'), render: fmtBytes },
-        { title: '配额', dataIndex: 'quota_bytes', sorter: numberSorter('quota_bytes'), render: fmtQuota },
+        { title: '源配额', dataIndex: 'quota_bytes', sorter: numberSorter('quota_bytes'), render: fmtQuota },
         { title: '使用率', dataIndex: 'percentage', sorter: numberSorter('percentage'), render: value => value == null ? '—' : `${value}%` },
         { title: '客户端策略', width: 210, sorter: textSorter('policy'), render: (_, row: any) => <Select allowClear value={row.assigned_policy_id ?? undefined} placeholder={row.policy ? `继承：${row.policy}` : '未设置'} style={{ width: 190 }} options={policies.filter((policy: any) => !policy.description?.startsWith('trafficmanager:client:') || policy.id === row.assigned_policy_id).map((policy: any) => ({ value: policy.id, label: policy.name }))} onChange={policyId => assignPolicy(row, policyId)} /> },
         { title: '来源', dataIndex: 'policy_source', sorter: textSorter('policy_source'), render: value => ({ CLIENT: '客户端', INBOUND: '入站', NODE: '节点', GLOBAL: '全局', NONE: '无' } as Record<string, string>)[value] || value },
         { title: '警告', render: (_, row: any) => row.policy_conflict ? <Tag color="gold">策略冲突</Tag> : row.native_reset_conflict ? <Tag color="gold">原生重置冲突</Tag> : null },
-        { title: '操作', fixed: 'right', width: 190, render: (_, row: any) => <Space><Button onClick={() => openClientPolicy(row)}>单独配置</Button><Button disabled={row.managed_mode !== 'MANAGED' || !row.policy || row.policy_conflict} loading={quotaSyncing === row.id} onClick={() => syncQuota(row)}>同步配额</Button></Space> },
+        { title: '操作', fixed: 'right', width: 110, render: (_, row: any) => <Button onClick={() => openClientPolicy(row)}>单独周期</Button> },
       ]}
     />
     <Modal
@@ -410,22 +384,20 @@ function Clients() {
       </Space>}
     </Modal>
     <Modal
-      title={configuring ? `单独配置：${configuring.local_remark || configuring.email}` : '单独配置客户端'}
+      title={configuring ? `设置重置周期：${configuring.local_remark || configuring.email}` : '设置客户端重置周期'}
       open={Boolean(configuring)}
-      okText="保存专属策略"
+      okText="保存重置周期"
       cancelText="取消"
       confirmLoading={configSaving}
       onCancel={() => !configSaving && setConfiguring(null)}
       onOk={() => clientPolicyForm.submit()}
     >
-      <Alert className="selection-alert" type="info" showIcon message="保存后将建立客户端专属策略，优先于入站、节点和全局策略。配额会在下次自动周期或手动“开始新周期”时写入面板；只有“托管”模式会执行。" />
+      <Alert className="selection-alert" type="info" showIcon message="保存后将建立客户端专属重置周期，优先于入站、节点和全局策略。TrafficManager 不修改源面板配额；只有“托管”模式会执行流量重置。" />
       <Form form={clientPolicyForm} layout="vertical" onFinish={saveClientPolicy}>
-        <Form.Item name="quota_gib" label="配额（GiB，留空表示不限）"><InputNumber min={0} precision={2} style={{ width: '100%' }} /></Form.Item>
         <Form.Item name="reset_enabled" label="每月自动重置" valuePropName="checked"><Switch /></Form.Item>
         <Form.Item name="monthly_day" label="每月日期" rules={[{ required: true, message: '请输入每月日期' }]}><InputNumber min={1} max={31} style={{ width: '100%' }} /></Form.Item>
         <Form.Item name="local_time" label="本地时间" rules={[{ required: true, message: '请输入执行时间' }]}><Input type="time" /></Form.Item>
         <Form.Item name="timezone" label="IANA 时区" rules={[{ required: true, message: '请选择时区' }]}><Select showSearch options={['UTC', 'Asia/Shanghai', 'Asia/Tokyo', 'America/New_York', 'America/Los_Angeles', 'Europe/London', 'Europe/Berlin'].map(value => ({ value }))} /></Form.Item>
-        <Form.Item name="sync_after_save" label="保存后立即同步配额到源节点" valuePropName="checked"><Switch disabled={configuring?.managed_mode !== 'MANAGED'} /></Form.Item>
       </Form>
     </Modal>
   </>
@@ -446,8 +418,8 @@ function Policies() {
   const [editForm] = Form.useForm()
   const create = async (values: any) => {
     try {
-      const { node_ids = [], quota_gib, ...policyValues } = values
-      const policy = await api('/api/policies', { method: 'POST', body: JSON.stringify({ ...policyValues, quota_bytes: quota_gib == null ? null : Number(quota_gib) * 1073741824, local_time: values.local_time || '00:00', enabled: true, reset_enabled: values.reset_enabled ?? true, catchup_enabled: true, catchup_max_hours: 168, missing_day_policy: 'LAST_DAY', reactivate_mode: 'PRESERVE' }) })
+      const { node_ids = [], ...policyValues } = values
+      const policy = await api('/api/policies', { method: 'POST', body: JSON.stringify({ ...policyValues, local_time: values.local_time || '00:00', enabled: true, reset_enabled: values.reset_enabled ?? true, catchup_enabled: true, catchup_max_hours: 168, missing_day_policy: 'LAST_DAY', reactivate_mode: 'PRESERVE' }) })
       if (node_ids.length) await api(`/api/policies/${policy.id}/node-assignments`, { method: 'PUT', body: JSON.stringify({ node_ids }) })
       message.success('策略已创建')
       setOpen(false)
@@ -474,7 +446,6 @@ function Policies() {
   const openEdit = (policy: any) => {
     editForm.setFieldsValue({
       name: policy.name,
-      quota_gib: policy.quota_bytes == null ? null : policy.quota_bytes / 1073741824,
       reset_enabled: policy.reset_enabled,
       monthly_day: policy.monthly_day,
       local_time: policy.local_time,
@@ -492,7 +463,6 @@ function Policies() {
         body: JSON.stringify({
           name: values.name,
           description: editing.description || '',
-          quota_bytes: values.quota_gib == null ? null : Math.round(Number(values.quota_gib) * 1073741824),
           reset_enabled: values.reset_enabled ?? false,
           monthly_day: values.monthly_day,
           local_time: values.local_time,
@@ -516,10 +486,9 @@ function Policies() {
   const nodeNames = new Map(nodes.map((node: any) => [node.id, node.name]))
   return <>
     <Space className="heading"><Typography.Title level={2}>策略</Typography.Title><Button type="primary" onClick={() => setOpen(true)}>创建策略</Button></Space>
-    <Alert className="selection-alert" type="info" showIcon message="节点分配可作为整台节点的默认策略；客户端页面可覆盖策略或直接设置专属配额和周期。定时任务只处理“托管”客户端。" />
+    <Alert className="selection-alert" type="info" showIcon message="策略只定义流量重置周期，不修改源 3x-ui 的客户端配额。节点分配可作为默认周期，客户端页面可单独覆盖；定时任务只处理“托管”客户端。" />
     <Table rowKey="id" dataSource={data} columns={[
       { title: '名称', dataIndex: 'name', sorter: textSorter('name') },
-      { title: '配额', dataIndex: 'quota_bytes', sorter: numberSorter('quota_bytes'), render: fmtQuota },
       { title: '计划', sorter: (left, right) => (left.monthly_day * 1440 + Number(left.local_time?.slice(0, 2)) * 60 + Number(left.local_time?.slice(3, 5))) - (right.monthly_day * 1440 + Number(right.local_time?.slice(0, 2)) * 60 + Number(right.local_time?.slice(3, 5))), render: (_, row: any) => row.reset_enabled ? `每月 ${row.monthly_day} 日 ${row.local_time}` : '已禁用' },
       { title: '时区', dataIndex: 'timezone', sorter: textSorter('timezone') },
       { title: '分配范围', sorter: (left, right) => (left.node_ids?.length + left.client_ids?.length) - (right.node_ids?.length + right.client_ids?.length), render: (_, row: any) => <Space direction="vertical" size={0}>{row.node_ids?.length ? <span>节点：{row.node_ids.map((id: number) => nodeNames.get(id) || `#${id}`).join('、')}</span> : null}{row.client_ids?.length ? <span>客户端：{row.client_ids.length} 个</span> : null}{!row.node_ids?.length && !row.client_ids?.length ? <span>未分配</span> : null}</Space> },
@@ -530,7 +499,6 @@ function Policies() {
     <Modal title="创建策略" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="创建" cancelText="取消">
       <Form form={form} layout="vertical" onFinish={create}>
         <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入策略名称' }]}><Input /></Form.Item>
-        <Form.Item name="quota_gib" label="配额（GiB，留空表示不限）"><InputNumber min={0} precision={0} style={{ width: '100%' }} /></Form.Item>
         <Form.Item name="reset_enabled" label="每月重置" valuePropName="checked" initialValue={true}><Switch /></Form.Item>
         <Form.Item name="monthly_day" label="日期" initialValue={1}><InputNumber min={1} max={31} /></Form.Item>
         <Form.Item name="local_time" label="本地时间" initialValue="00:00"><Input type="time" /></Form.Item>
@@ -545,7 +513,6 @@ function Policies() {
     <Modal title={editing ? `编辑策略：${editing.name}` : '编辑策略'} open={Boolean(editing)} okText="保存" cancelText="取消" confirmLoading={editLoading} onOk={() => editForm.submit()} onCancel={() => setEditing(null)}>
       <Form form={editForm} layout="vertical" onFinish={saveEdit}>
         <Form.Item name="name" label="策略名称" rules={[{ required: true, message: '请输入策略名称' }]}><Input maxLength={120} /></Form.Item>
-        <Form.Item name="quota_gib" label="配额（GiB，留空表示不限）"><InputNumber min={0} precision={2} style={{ width: '100%' }} /></Form.Item>
         <Form.Item name="reset_enabled" label="每月重置" valuePropName="checked"><Switch /></Form.Item>
         <Form.Item name="monthly_day" label="日期" rules={[{ required: true }]}><InputNumber min={1} max={31} style={{ width: '100%' }} /></Form.Item>
         <Form.Item name="local_time" label="本地时间" rules={[{ required: true }]}><Input type="time" /></Form.Item>

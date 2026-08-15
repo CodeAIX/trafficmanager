@@ -71,9 +71,9 @@ docker run -d \
 
 打开 `http://服务器IP:2083` 创建首个管理员，然后进入 **Nodes → Add node** 添加 3x-ui 节点。Base URL 必须保留 3x-ui 的 WebBasePath，例如 `https://host:2053/abcdef`。
 
-如果一个 3x-ui 面板聚合了多台 VPS，TrafficManager 会把它们视为同一面板节点。这种拓扑建议在 **客户端** 页面管理：第一列“备注”可填写真实 VPS、机房或用途，备注只保存在 TrafficManager，不会被节点同步覆盖；“客户端策略”可让同一面板下的不同客户端使用不同策略；“单独配置”可直接设置某个客户端自己的配额、每月重置日期、时间和时区。各列表点击列标题即可升序或降序排列，策略可在策略列表中编辑名称及配置。
+如果一个 3x-ui 面板聚合了多台 VPS，TrafficManager 会把它们视为同一面板节点。这种拓扑建议在 **客户端** 页面管理：第一列“备注”可填写真实 VPS、机房或用途，备注只保存在 TrafficManager，不会被节点同步覆盖；“客户端策略”可让同一面板下的不同客户端使用不同重置策略；“单独周期”可直接设置某个客户端自己的每月重置日期、时间和时区。各列表点击列标题即可升序或降序排列，策略可在策略列表中编辑名称及周期配置。
 
-策略配额是 TrafficManager 的目标值。“开始新周期”会把它写入源 3x-ui 并重置客户端流量；如果只想写入配额而保留当前已用流量，把客户端切换为“托管”后点击 **同步配额**。客户端“单独配置”中的“保存后立即同步配额到源节点”也可完成同一操作。不限流量会写入为 3x-ui 的 `0`。
+客户端配额以源 3x-ui 面板为唯一数据源，TrafficManager 只读取和显示，不提供配额设置或写回功能。需要修改配额时请在源面板操作，然后在 TrafficManager 的节点页面点击“同步”。TrafficManager 的策略只定义流量重置周期；定时重置、手动“重置流量”和“开始新周期”都不会修改源客户端配额。
 
 查看状态与日志：
 
@@ -143,7 +143,7 @@ Before saving, TrafficManager authenticates, reads `/panel/api/openapi.json`, de
 
 ## Policies
 
-A policy keeps quota and reset schedule separate. Quota is an integer byte count or unlimited. A reset can be disabled independently. Assignments resolve in this order:
+A policy defines a reset schedule. Client quota remains owned by and read from the source 3x-ui panel. Assignments resolve in this order:
 
 ```text
 Client > Inbound > Node > Global
@@ -163,9 +163,7 @@ Scheduled monthly jobs use `(policy_id, YYYY-MM, action)` uniqueness, making sch
 
 ## Manual reset
 
-**Reset traffic** clears per-client upload/download counters and does not alter quota or inbound aggregate counters. **Start new cycle** applies the effective quota, resets client traffic, and applies the policy reactivation rule. Both show a target preview before execution. Successful HTTP status alone is insufficient: the executor reads the client again and marks a non-zero result `VERIFY_FAILED`.
-
-**Sync quota** writes only the effective policy quota to the source 3x-ui client and preserves the current upload/download counters. The client must be **Managed** and have one conflict-free effective policy.
+**Reset traffic** and **Start new cycle** clear per-client upload/download counters without altering the source quota or inbound aggregate counters. The latter records a new TrafficManager cycle and applies the policy reactivation rule. Both show a target preview before execution. Successful HTTP status alone is insufficient: the executor reads the client again and marks a non-zero result `VERIFY_FAILED`.
 
 One offline node does not stop other targets. The overall result becomes `PARTIAL`, and **Retry Failed Items** creates a retry containing only failures. Job details retain per-client before/after counters and the Audit Log records every side effect without credentials.
 

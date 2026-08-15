@@ -30,7 +30,7 @@ def test_setup_session_is_recognized_by_auth_status():
 
         with SessionLocal() as db:
             node = Node(name="test-node", base_url="https://node.example", token_ciphertext=b"encrypted", token_nonce=b"nonce")
-            observed = Client(node=node, email="observed@example.com", managed_mode="OBSERVE")
+            observed = Client(node=node, email="observed@example.com", managed_mode="OBSERVE", quota_remote_bytes=4096)
             db.add_all([node, observed])
             db.commit()
             observed_id = observed.id
@@ -64,13 +64,13 @@ def test_setup_session_is_recognized_by_auth_status():
         policies = client.get("/api/policies")
         assert policies.status_code == 200
         assert policies.json()[0]["node_ids"] == [node.id]
+        assert "quota_bytes" not in policies.json()[0]
 
         renamed = client.put(
             f"/api/policies/{policy_id}",
             headers=headers,
             json={
                 "name": "monthly-renamed",
-                "quota_bytes": 1000,
                 "reset_enabled": True,
                 "monthly_day": 1,
                 "local_time": "00:00",
@@ -90,12 +90,12 @@ def test_setup_session_is_recognized_by_auth_status():
         assert updated.json()["local_remark"] == "原始节点：荷兰 VPS"
         assert updated.json()["assigned_policy_id"] == policy_id
         assert updated.json()["policy_source"] == "CLIENT"
+        assert updated.json()["quota_bytes"] == 4096
 
         dedicated = client.put(
             f"/api/clients/{observed_id}/dedicated-policy",
             headers=headers,
             json={
-                "quota_bytes": 2000,
                 "reset_enabled": True,
                 "monthly_day": 15,
                 "local_time": "08:30",
@@ -104,7 +104,8 @@ def test_setup_session_is_recognized_by_auth_status():
         )
         assert dedicated.status_code == 200
         assert dedicated.json()["assigned_policy_id"] != policy_id
-        assert dedicated.json()["policy_config"]["quota_bytes"] == 2000
+        assert "quota_bytes" not in dedicated.json()["policy_config"]
+        assert dedicated.json()["quota_bytes"] == 4096
         assert dedicated.json()["policy_config"]["monthly_day"] == 15
         assert dedicated.json()["policy_config"]["local_time"] == "08:30"
 

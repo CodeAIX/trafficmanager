@@ -94,9 +94,6 @@ class ThreeXUIAdapter(ABC):
     async def get_client(self, email: str, inbound_id: int | None = None) -> dict[str, Any]: ...
 
     @abstractmethod
-    async def update_client_quota(self, email: str, quota_bytes: int, inbound_id: int | None = None) -> dict[str, Any]: ...
-
-    @abstractmethod
     async def reset_client_traffic(self, email: str, inbound_id: int | None = None) -> None: ...
 
     async def list_clients(self) -> list[dict[str, Any]]:
@@ -148,22 +145,6 @@ class LegacyThreeXUIAdapter(ThreeXUIAdapter):
     async def _full_inbound(self, inbound_id: int) -> dict[str, Any]:
         return await self._request("GET", f"/panel/api/inbounds/get/{inbound_id}")
 
-    async def update_client_quota(self, email: str, quota_bytes: int, inbound_id: int | None = None) -> dict[str, Any]:
-        if inbound_id is None:
-            raise AdapterError("INVALID_RESPONSE", "Inbound id is required for legacy client update")
-        inbound = await self._full_inbound(inbound_id)
-        settings = inbound.get("settings", {})
-        if isinstance(settings, str):
-            settings = json.loads(settings)
-        target = next((c for c in settings.get("clients", []) if c.get("email") == email), None)
-        if target is None:
-            raise AdapterError("INVALID_RESPONSE", f"Client {email} not found")
-        target["totalGB"] = int(quota_bytes)
-        payload = dict(inbound)
-        payload["settings"] = json.dumps(settings, separators=(",", ":"))
-        await self._request("POST", f"/panel/api/inbounds/update/{inbound_id}", data=payload)
-        return await self.get_client(email, inbound_id)
-
     async def reset_client_traffic(self, email: str, inbound_id: int | None = None) -> None:
         if inbound_id is None:
             raise AdapterError("INVALID_RESPONSE", "Inbound id is required for legacy reset")
@@ -189,19 +170,6 @@ class ModernThreeXUIAdapter(LegacyThreeXUIAdapter):
             if exc.status_code != 404:
                 raise
             return await super().get_client(email, inbound_id)
-
-    async def update_client_quota(self, email: str, quota_bytes: int, inbound_id: int | None = None) -> dict[str, Any]:
-        try:
-            encoded = self._email_path(email)
-            result = await self._request("GET", f"/panel/api/clients/get/{encoded}")
-            payload = dict(result.get("client", result)) if isinstance(result, dict) else {}
-            payload["totalGB"] = int(quota_bytes)
-            await self._request("POST", f"/panel/api/clients/update/{encoded}", json=payload)
-            return await self.get_client(email, inbound_id)
-        except AdapterError as exc:
-            if exc.status_code != 404:
-                raise
-            return await super().update_client_quota(email, quota_bytes, inbound_id)
 
     async def reset_client_traffic(self, email: str, inbound_id: int | None = None) -> None:
         try:

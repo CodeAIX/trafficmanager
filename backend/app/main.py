@@ -20,7 +20,7 @@ from .database import Base, engine, get_db, utcnow
 from .models import Admin, AuditLog, Client, Inbound, JobItem, JobRun, Node, Policy, PolicyAssignment, WebSession
 from .policies import resolve_effective_policy
 from .security import encrypt_token, hash_password, new_session, verify_password
-from .services import audit, create_job, execute_job, probe_node, scheduler_loop, sync_client_quota, sync_node
+from .services import audit, create_job, execute_job, probe_node, scheduler_loop, sync_node
 
 Db = Annotated[Session, Depends(get_db)]
 stop_event = asyncio.Event()
@@ -61,7 +61,6 @@ class NodeInput(BaseModel):
 class PolicyInput(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
-    quota_bytes: int | None = Field(default=None, ge=0)
     reset_enabled: bool = True
     monthly_day: int = Field(default=1, ge=1, le=31)
     local_time: time = time(0, 0)
@@ -94,7 +93,6 @@ class PolicyInput(BaseModel):
 
 
 class ClientPolicyInput(BaseModel):
-    quota_bytes: int | None = Field(default=None, ge=0)
     reset_enabled: bool = True
     monthly_day: int = Field(default=1, ge=1, le=31)
     local_time: time = time(0, 0)
@@ -145,13 +143,12 @@ def client_json(db: Session, client: Client) -> dict[str, Any]:
     effective = resolve_effective_policy(db, client)
     direct_assignment = db.scalar(select(PolicyAssignment).where(PolicyAssignment.scope_type == "CLIENT", PolicyAssignment.scope_id == client.id))
     used = client.upload_bytes + client.download_bytes
-    quota = effective.policy.quota_bytes if effective.policy else client.quota_remote_bytes
+    quota = client.quota_remote_bytes
     policy_config = None
     if effective.policy:
         policy_config = {
             "id": effective.policy.id,
             "name": effective.policy.name,
-            "quota_bytes": effective.policy.quota_bytes,
             "reset_enabled": effective.policy.reset_enabled,
             "monthly_day": effective.policy.monthly_day,
             "local_time": effective.policy.local_time.strftime("%H:%M"),
@@ -343,6 +340,7 @@ def set_client_dedicated_policy(client_id: int, body: ClientPolicyInput, db: Db,
             db.add(PolicyAssignment(policy_id=policy.id, scope_type="CLIENT", scope_id=client.id))
     for key, value in body.model_dump().items():
         setattr(policy, key, value)
+    policy.quota_bytes = None
     policy.enabled = True
     policy.missing_day_policy = "LAST_DAY"
     policy.catchup_enabled = True
@@ -352,15 +350,6 @@ def set_client_dedicated_policy(client_id: int, body: ClientPolicyInput, db: Db,
     audit(db, "SET_CLIENT_DEDICATED_POLICY", "CLIENT", f"{client.node.name}/{client.email}", "SUCCESS", source="MANUAL", actor=admin.username, after={"policy_id": policy.id, **body.model_dump(mode="json")})
     db.commit()
     return client_json(db, client)
-
-
-@app.post("/api/clients/{client_id}/sync-quota", dependencies=[Depends(require_csrf)])
-async def run_client_quota_sync(client_id: int, admin: AdminDep):
-    try:
-        return await sync_client_quota(client_id, admin.username)
-    except AdapterError as exc:
-        status = 404 if exc.code == "CLIENT_NOT_FOUND" else (409 if exc.code in {"CLIENT_NOT_MANAGED", "POLICY_CONFLICT", "NO_EFFECTIVE_POLICY"} else 502)
-        raise HTTPException(status, {"code": exc.code, "message": str(exc)}) from exc
 
 
 class JobRequest(BaseModel):
@@ -421,7 +410,7 @@ def reset_client(client_id: int, background: BackgroundTasks, db: Db, _admin: Ad
 def policy_json(db: Session, policy: Policy) -> dict:
     node_ids = db.scalars(select(PolicyAssignment.scope_id).where(PolicyAssignment.policy_id == policy.id, PolicyAssignment.scope_type == "NODE")).all()
     client_ids = db.scalars(select(PolicyAssignment.scope_id).where(PolicyAssignment.policy_id == policy.id, PolicyAssignment.scope_type == "CLIENT")).all()
-    return {"id": policy.id, "name": policy.name, "description": policy.description, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "missing_day_policy": policy.missing_day_policy, "catchup_enabled": policy.catchup_enabled, "catchup_max_hours": policy.catchup_max_hours, "reactivate_mode": policy.reactivate_mode, "enabled": policy.enabled, "next_run_at": utc_json(policy.next_run_at), "node_ids": node_ids, "client_ids": client_ids}
+    return {"id": policy.id, "name": policy.name, "description": policy.description, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "missing_day_policy": policy.missing_day_policy, "catchup_enabled": policy.catchup_enabled, "catchup_max_hours": policy.catchup_max_hours, "reactivate_mode": policy.reactivate_mode, "enabled": policy.enabled, "next_run_at": utc_json(policy.next_run_at), "node_ids": node_ids, "client_ids": client_ids}
 
 
 @app.get("/api/policies")
@@ -433,7 +422,9 @@ def list_policies(db: Db, _admin: AdminDep):
 def add_policy(body: PolicyInput, db: Db, admin: AdminDep):
     if db.scalar(select(Policy).where(Policy.name == body.name)):
         raise HTTPException(409, "Policy name already exists")
-    policy = Policy(**body.model_dump())
+    values = body.model_dump()
+    values["quota_bytes"] = None
+    policy = Policy(**values)
     if policy.enabled and policy.reset_enabled:
         policy.next_run_at = next_occurrence(utcnow(), policy.monthly_day, policy.local_time, policy.timezone, policy.missing_day_policy)
     db.add(policy)
@@ -451,11 +442,13 @@ def update_policy(policy_id: int, body: PolicyInput, db: Db, admin: AdminDep):
     duplicate = db.scalar(select(Policy).where(Policy.name == body.name, Policy.id != policy.id))
     if duplicate:
         raise HTTPException(409, "Policy name already exists")
-    before = {"name": policy.name, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "enabled": policy.enabled}
-    for key, value in body.model_dump().items():
+    before = {"name": policy.name, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "enabled": policy.enabled}
+    values = body.model_dump()
+    values["quota_bytes"] = None
+    for key, value in values.items():
         setattr(policy, key, value)
     policy.next_run_at = next_occurrence(utcnow(), policy.monthly_day, policy.local_time, policy.timezone, policy.missing_day_policy) if policy.enabled and policy.reset_enabled else None
-    after = {"name": policy.name, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "enabled": policy.enabled}
+    after = {"name": policy.name, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "enabled": policy.enabled}
     audit(db, "UPDATE_POLICY", "POLICY", policy.name, "SUCCESS", source="MANUAL", actor=admin.username, before=before, after=after)
     db.commit()
     return policy_json(db, policy)
