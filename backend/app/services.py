@@ -156,6 +156,11 @@ async def _execute_item(job_id: int, item_id: int) -> bool:
                 item.after_up, item.after_down = int(after.get("up", 0) or 0), int(after.get("down", 0) or 0)
                 if not verified["verified"]:
                     raise AdapterError("VERIFY_FAILED", "Traffic or quota did not match after verification")
+                client.quota_remote_bytes = item.after_quota
+                client.upload_bytes = item.after_up
+                client.download_bytes = item.after_down
+                client.last_synced_at = utcnow()
+                client.sync_status = "OK"
                 item.status = "SUCCESS"
                 audit(db, job.type, "CLIENT", f"{node.name}/{client.email}", "SUCCESS", source=job.source, before={"quota": item.before_quota, "up": item.before_up, "down": item.before_down}, after={"quota": item.after_quota, "up": item.after_up, "down": item.after_down}, job_id=job.id)
                 return True
@@ -184,10 +189,13 @@ async def execute_job(job_id: int) -> None:
         job = db.get(JobRun, job_id)
         all_success = len([i for i in job.items if i.status == "SUCCESS"])
         failed = len(job.items) - all_success
+        node_ids = {item.node_id for item in job.items}
         job.success_count, job.failure_count, job.finished_at = all_success, failed, utcnow()
         job.status = "SUCCESS" if failed == 0 else ("PARTIAL" if all_success else "FAILED")
         job.summary = f"{all_success} succeeded, {failed} failed"
         db.commit()
+    if node_ids:
+        await asyncio.gather(*(sync_node(node_id) for node_id in node_ids), return_exceptions=True)
 
 
 async def scheduler_tick() -> None:

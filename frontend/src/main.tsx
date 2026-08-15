@@ -43,6 +43,16 @@ async function api(path: string, options: RequestInit = {}) {
 }
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error)
+const delay = (milliseconds: number) => new Promise(resolve => window.setTimeout(resolve, milliseconds))
+
+async function waitForJob(jobId: number) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const job = await api(`/api/jobs/${jobId}`)
+    if (['SUCCESS', 'FAILED', 'PARTIAL'].includes(job.status)) return job
+    await delay(750)
+  }
+  return null
+}
 
 const modeLabels: Record<string, string> = {
   MANAGED: '托管',
@@ -184,7 +194,7 @@ type ResetPreview = {
 function Clients() {
   const { message } = AntApp.useApp()
   const qc = useQueryClient()
-  const { data = [], isFetching } = useQuery({ queryKey: ['clients'], queryFn: () => api('/api/clients') })
+  const { data = [], isFetching } = useQuery({ queryKey: ['clients'], queryFn: () => api('/api/clients'), refetchInterval: 15000 })
   const [selected, setSelected] = useState<React.Key[]>([])
   const [preview, setPreview] = useState<ResetPreview | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -223,13 +233,18 @@ function Clients() {
         method: 'POST',
         body: JSON.stringify({ client_ids: selected.map(Number), start_new_cycle: preview.start }),
       })
-      message.success(`任务 #${result.job_id} 已创建，可在“任务”页面查看进度`)
+      message.loading({ content: `任务 #${result.job_id} 正在执行并同步节点…`, key: 'reset-job', duration: 0 })
+      const job = await waitForJob(result.job_id)
       setPreview(null)
       setSelected([])
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['jobs'] }),
         qc.invalidateQueries({ queryKey: ['clients'] }),
+        qc.invalidateQueries({ queryKey: ['dashboard'] }),
       ])
+      if (!job) message.info({ content: `任务 #${result.job_id} 仍在后台执行，列表会自动刷新`, key: 'reset-job' })
+      else if (job.status === 'SUCCESS') message.success({ content: `任务 #${result.job_id} 已成功，流量信息已自动同步`, key: 'reset-job' })
+      else message.error({ content: `任务 #${result.job_id} 执行${job.status === 'PARTIAL' ? '部分成功' : '失败'}，请到“任务”查看详情`, key: 'reset-job' })
     } catch (error) {
       message.error(`操作失败：${errorText(error)}`)
     } finally {
