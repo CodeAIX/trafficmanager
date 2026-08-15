@@ -71,6 +71,8 @@ docker run -d \
 
 打开 `http://服务器IP:2083` 创建首个管理员，然后进入 **Nodes → Add node** 添加 3x-ui 节点。Base URL 必须保留 3x-ui 的 WebBasePath，例如 `https://host:2053/abcdef`。
 
+如果一个 3x-ui 面板聚合了多台 VPS，TrafficManager 会把它们视为同一面板节点。这种拓扑建议在 **客户端** 页面管理：第一列“备注”可填写真实 VPS、机房或用途，备注只保存在 TrafficManager，不会被节点同步覆盖；“客户端策略”可让同一面板下的不同客户端使用不同策略；“单独配置”可直接设置某个客户端自己的配额、每月重置日期、时间和时区。
+
 查看状态与日志：
 
 ```bash
@@ -145,7 +147,9 @@ A policy keeps quota and reset schedule separate. Quota is an integer byte count
 Client > Inbound > Node > Global
 ```
 
-If a client belongs to multiple inbounds with different policies and has no client override, its effective policy is `POLICY_CONFLICT` and automatic execution stops for that client. Remote 3x-ui native reset settings are not changed; the Clients page warns when both native and Fleet resets are active.
+If a client belongs to multiple inbounds with different policies and has no client override, its effective policy is `POLICY_CONFLICT` and automatic execution stops for that client. Remote 3x-ui native reset settings are not changed; the Clients page warns when both native and TrafficManager resets are active.
+
+For an aggregated 3x-ui panel, a node assignment is best used as the default policy. Assign a reusable policy from the Clients page to override that default, or use **单独配置** to create an isolated per-client policy. A client policy never changes the policy of another client under the same panel. Local client remarks are independent of remote 3x-ui comments and survive synchronization.
 
 Only **Managed** clients may be changed. **Observe** clients are synchronized and displayed but never mutated; **Ignore** clients stay outside normal management.
 

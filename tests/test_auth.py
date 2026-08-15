@@ -64,3 +64,39 @@ def test_setup_session_is_recognized_by_auth_status():
         policies = client.get("/api/policies")
         assert policies.status_code == 200
         assert policies.json()[0]["node_ids"] == [node.id]
+
+        updated = client.patch(
+            f"/api/clients/{observed_id}",
+            headers=headers,
+            json={"local_remark": "原始节点：荷兰 VPS", "policy_id": policy_id},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["local_remark"] == "原始节点：荷兰 VPS"
+        assert updated.json()["assigned_policy_id"] == policy_id
+        assert updated.json()["policy_source"] == "CLIENT"
+
+        dedicated = client.put(
+            f"/api/clients/{observed_id}/dedicated-policy",
+            headers=headers,
+            json={
+                "quota_bytes": 2000,
+                "reset_enabled": True,
+                "monthly_day": 15,
+                "local_time": "08:30",
+                "timezone": "Asia/Shanghai",
+            },
+        )
+        assert dedicated.status_code == 200
+        assert dedicated.json()["assigned_policy_id"] != policy_id
+        assert dedicated.json()["policy_config"]["quota_bytes"] == 2000
+        assert dedicated.json()["policy_config"]["monthly_day"] == 15
+        assert dedicated.json()["policy_config"]["local_time"] == "08:30"
+
+        inherited = client.patch(
+            f"/api/clients/{observed_id}",
+            headers=headers,
+            json={"policy_id": None},
+        )
+        assert inherited.status_code == 200
+        assert inherited.json()["assigned_policy_id"] is None
+        assert inherited.json()["policy_source"] == "NODE"

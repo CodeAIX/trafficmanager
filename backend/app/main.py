@@ -93,6 +93,20 @@ class PolicyInput(BaseModel):
         return value
 
 
+class ClientPolicyInput(BaseModel):
+    quota_bytes: int | None = Field(default=None, ge=0)
+    reset_enabled: bool = True
+    monthly_day: int = Field(default=1, ge=1, le=31)
+    local_time: time = time(0, 0)
+    timezone: str = "UTC"
+
+    @field_validator("timezone")
+    @classmethod
+    def timezone_exists(cls, value: str) -> str:
+        validate_timezone(value)
+        return value
+
+
 def session_hash(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -129,9 +143,21 @@ def node_json(node: Node) -> dict[str, Any]:
 
 def client_json(db: Session, client: Client) -> dict[str, Any]:
     effective = resolve_effective_policy(db, client)
+    direct_assignment = db.scalar(select(PolicyAssignment).where(PolicyAssignment.scope_type == "CLIENT", PolicyAssignment.scope_id == client.id))
     used = client.upload_bytes + client.download_bytes
     quota = effective.policy.quota_bytes if effective.policy else client.quota_remote_bytes
-    return {"id": client.id, "node_id": client.node_id, "node": client.node.name, "email": client.email, "comment": client.comment, "enabled": client.enabled, "managed_mode": client.managed_mode, "inbounds": [{"id": i.id, "remote_id": i.remote_id, "remark": i.remark} for i in client.inbounds], "used_bytes": used, "upload_bytes": client.upload_bytes, "download_bytes": client.download_bytes, "quota_bytes": quota, "percentage": round(used * 100 / quota, 2) if quota else None, "policy": effective.policy.name if effective.policy else None, "policy_source": effective.source, "policy_conflict": effective.conflict, "native_reset_conflict": client.remote_reset_mode.lower() not in {"", "0", "disabled", "none"} and bool(effective.policy and effective.policy.reset_enabled), "remote_missing": client.remote_missing, "last_synced_at": utc_json(client.last_synced_at)}
+    policy_config = None
+    if effective.policy:
+        policy_config = {
+            "id": effective.policy.id,
+            "name": effective.policy.name,
+            "quota_bytes": effective.policy.quota_bytes,
+            "reset_enabled": effective.policy.reset_enabled,
+            "monthly_day": effective.policy.monthly_day,
+            "local_time": effective.policy.local_time.strftime("%H:%M"),
+            "timezone": effective.policy.timezone,
+        }
+    return {"id": client.id, "node_id": client.node_id, "node": client.node.name, "email": client.email, "comment": client.comment, "local_remark": client.local_remark, "enabled": client.enabled, "managed_mode": client.managed_mode, "inbounds": [{"id": i.id, "remote_id": i.remote_id, "remark": i.remark} for i in client.inbounds], "used_bytes": used, "upload_bytes": client.upload_bytes, "download_bytes": client.download_bytes, "quota_bytes": quota, "percentage": round(used * 100 / quota, 2) if quota else None, "policy": effective.policy.name if effective.policy else None, "policy_source": effective.source, "policy_conflict": effective.conflict, "assigned_policy_id": direct_assignment.policy_id if direct_assignment else None, "policy_config": policy_config, "native_reset_conflict": client.remote_reset_mode.lower() not in {"", "0", "disabled", "none"} and bool(effective.policy and effective.policy.reset_enabled), "remote_missing": client.remote_missing, "last_synced_at": utc_json(client.last_synced_at)}
 
 
 @app.get("/health")
@@ -266,17 +292,64 @@ def update_client(client_id: int, body: dict, db: Db, admin: AdminDep):
             raise HTTPException(422, "Invalid managed mode")
         before, client.managed_mode = client.managed_mode, mode
         audit(db, "SET_MANAGED_MODE", "CLIENT", f"{client.node.name}/{client.email}", "SUCCESS", source="MANUAL", actor=admin.username, before={"managed_mode": before}, after={"managed_mode": mode})
+    if "local_remark" in body:
+        remark = str(body["local_remark"] or "").strip()
+        if len(remark) > 255:
+            raise HTTPException(422, "Client remark must not exceed 255 characters")
+        before, client.local_remark = client.local_remark, remark
+        audit(db, "SET_CLIENT_REMARK", "CLIENT", f"{client.node.name}/{client.email}", "SUCCESS", source="MANUAL", actor=admin.username, before={"local_remark": before}, after={"local_remark": remark})
     if "policy_id" in body:
         existing = db.scalar(select(PolicyAssignment).where(PolicyAssignment.scope_type == "CLIENT", PolicyAssignment.scope_id == client.id))
-        if body["policy_id"] is None and existing:
+        before_policy_id = existing.policy_id if existing else None
+        previous_policy = db.get(Policy, before_policy_id) if before_policy_id else None
+        requested_policy_id = int(body["policy_id"]) if body["policy_id"] is not None else None
+        if requested_policy_id is None and existing:
             db.delete(existing)
-        elif body["policy_id"] is not None:
-            if not db.get(Policy, int(body["policy_id"])):
+        elif requested_policy_id is not None:
+            if not db.get(Policy, requested_policy_id):
                 raise HTTPException(422, "Policy not found")
             if existing:
-                existing.policy_id = int(body["policy_id"])
+                existing.policy_id = requested_policy_id
             else:
-                db.add(PolicyAssignment(policy_id=int(body["policy_id"]), scope_type="CLIENT", scope_id=client.id))
+                db.add(PolicyAssignment(policy_id=requested_policy_id, scope_type="CLIENT", scope_id=client.id))
+        if previous_policy and previous_policy.description == f"trafficmanager:client:{client.id}" and previous_policy.id != requested_policy_id:
+            previous_policy.enabled = False
+            previous_policy.next_run_at = None
+        audit(db, "ASSIGN_CLIENT_POLICY", "CLIENT", f"{client.node.name}/{client.email}", "SUCCESS", source="MANUAL", actor=admin.username, before={"policy_id": before_policy_id}, after={"policy_id": requested_policy_id})
+    db.commit()
+    return client_json(db, client)
+
+
+@app.put("/api/clients/{client_id}/dedicated-policy", dependencies=[Depends(require_csrf)])
+def set_client_dedicated_policy(client_id: int, body: ClientPolicyInput, db: Db, admin: AdminDep):
+    client = db.get(Client, client_id)
+    if not client:
+        raise HTTPException(404, "Client not found")
+    marker = f"trafficmanager:client:{client.id}"
+    assignment = db.scalar(select(PolicyAssignment).where(PolicyAssignment.scope_type == "CLIENT", PolicyAssignment.scope_id == client.id))
+    policy = db.get(Policy, assignment.policy_id) if assignment else None
+    if not policy or policy.description != marker:
+        policy = db.scalar(select(Policy).where(Policy.description == marker))
+        if not policy:
+            name = f"客户端专属-{client.id}-{client.email}"[:120]
+            if db.scalar(select(Policy).where(Policy.name == name)):
+                name = f"客户端专属-{client.id}-{int(utcnow().timestamp())}"
+            policy = Policy(name=name, description=marker)
+            db.add(policy)
+            db.flush()
+        if assignment:
+            assignment.policy_id = policy.id
+        else:
+            db.add(PolicyAssignment(policy_id=policy.id, scope_type="CLIENT", scope_id=client.id))
+    for key, value in body.model_dump().items():
+        setattr(policy, key, value)
+    policy.enabled = True
+    policy.missing_day_policy = "LAST_DAY"
+    policy.catchup_enabled = True
+    policy.catchup_max_hours = 168
+    policy.reactivate_mode = "PRESERVE"
+    policy.next_run_at = next_occurrence(utcnow(), policy.monthly_day, policy.local_time, policy.timezone, policy.missing_day_policy) if policy.reset_enabled else None
+    audit(db, "SET_CLIENT_DEDICATED_POLICY", "CLIENT", f"{client.node.name}/{client.email}", "SUCCESS", source="MANUAL", actor=admin.username, after={"policy_id": policy.id, **body.model_dump(mode="json")})
     db.commit()
     return client_json(db, client)
 
@@ -338,7 +411,8 @@ def reset_client(client_id: int, background: BackgroundTasks, db: Db, _admin: Ad
 
 def policy_json(db: Session, policy: Policy) -> dict:
     node_ids = db.scalars(select(PolicyAssignment.scope_id).where(PolicyAssignment.policy_id == policy.id, PolicyAssignment.scope_type == "NODE")).all()
-    return {"id": policy.id, "name": policy.name, "description": policy.description, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "missing_day_policy": policy.missing_day_policy, "catchup_enabled": policy.catchup_enabled, "catchup_max_hours": policy.catchup_max_hours, "reactivate_mode": policy.reactivate_mode, "enabled": policy.enabled, "next_run_at": utc_json(policy.next_run_at), "node_ids": node_ids}
+    client_ids = db.scalars(select(PolicyAssignment.scope_id).where(PolicyAssignment.policy_id == policy.id, PolicyAssignment.scope_type == "CLIENT")).all()
+    return {"id": policy.id, "name": policy.name, "description": policy.description, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "missing_day_policy": policy.missing_day_policy, "catchup_enabled": policy.catchup_enabled, "catchup_max_hours": policy.catchup_max_hours, "reactivate_mode": policy.reactivate_mode, "enabled": policy.enabled, "next_run_at": utc_json(policy.next_run_at), "node_ids": node_ids, "client_ids": client_ids}
 
 
 @app.get("/api/policies")

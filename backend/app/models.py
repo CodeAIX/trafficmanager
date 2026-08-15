@@ -61,6 +61,7 @@ class Client(Base):
     node_id: Mapped[int] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"), index=True)
     email: Mapped[str] = mapped_column(String(255))
     comment: Mapped[str] = mapped_column(String(255), default="")
+    local_remark: Mapped[str] = mapped_column(String(255), default="")
     enabled: Mapped[bool] = mapped_column(default=True)
     managed_mode: Mapped[str] = mapped_column(String(16), default="OBSERVE")
     quota_remote_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
@@ -172,4 +173,3 @@ class WebSession(Base):
     admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
     csrf_token: Mapped[str] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-

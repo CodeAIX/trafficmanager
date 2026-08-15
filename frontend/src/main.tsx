@@ -195,10 +195,14 @@ function Clients() {
   const { message } = AntApp.useApp()
   const qc = useQueryClient()
   const { data = [], isFetching } = useQuery({ queryKey: ['clients'], queryFn: () => api('/api/clients'), refetchInterval: 15000 })
+  const { data: policies = [] } = useQuery({ queryKey: ['policies'], queryFn: () => api('/api/policies') })
   const [selected, setSelected] = useState<React.Key[]>([])
   const [preview, setPreview] = useState<ResetPreview | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [executing, setExecuting] = useState(false)
+  const [configuring, setConfiguring] = useState<any | null>(null)
+  const [configSaving, setConfigSaving] = useState(false)
+  const [clientPolicyForm] = Form.useForm()
   const selectedClients = useMemo(() => data.filter((client: any) => selected.includes(client.id)), [data, selected])
   const blocked = selectedClients.filter((client: any) => client.managed_mode !== 'MANAGED')
 
@@ -262,6 +266,65 @@ function Clients() {
     }
   }
 
+  const saveRemark = async (client: any, value: string) => {
+    const remark = value.trim()
+    if (remark === (client.local_remark || '')) return
+    try {
+      await api(`/api/clients/${client.id}`, { method: 'PATCH', body: JSON.stringify({ local_remark: remark }) })
+      message.success(`${client.email} 的备注已保存`)
+      await qc.invalidateQueries({ queryKey: ['clients'] })
+    } catch (error) {
+      message.error(`备注保存失败：${errorText(error)}`)
+      await qc.invalidateQueries({ queryKey: ['clients'] })
+    }
+  }
+
+  const assignPolicy = async (client: any, policyId?: number) => {
+    try {
+      await api(`/api/clients/${client.id}`, { method: 'PATCH', body: JSON.stringify({ policy_id: policyId ?? null }) })
+      message.success(policyId ? `${client.email} 已使用客户端策略` : `${client.email} 已恢复继承策略`)
+      await Promise.all([qc.invalidateQueries({ queryKey: ['clients'] }), qc.invalidateQueries({ queryKey: ['dashboard'] })])
+    } catch (error) {
+      message.error(`策略修改失败：${errorText(error)}`)
+    }
+  }
+
+  const openClientPolicy = (client: any) => {
+    const config = client.policy_config || {}
+    clientPolicyForm.setFieldsValue({
+      quota_gib: config.quota_bytes == null ? (client.quota_bytes ? client.quota_bytes / 1073741824 : null) : config.quota_bytes / 1073741824,
+      reset_enabled: config.reset_enabled ?? true,
+      monthly_day: config.monthly_day ?? 1,
+      local_time: config.local_time ?? '00:00',
+      timezone: config.timezone ?? 'Asia/Shanghai',
+    })
+    setConfiguring(client)
+  }
+
+  const saveClientPolicy = async (values: any) => {
+    if (!configuring) return
+    setConfigSaving(true)
+    try {
+      await api(`/api/clients/${configuring.id}/dedicated-policy`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          quota_bytes: values.quota_gib == null ? null : Math.round(Number(values.quota_gib) * 1073741824),
+          reset_enabled: values.reset_enabled ?? true,
+          monthly_day: values.monthly_day,
+          local_time: values.local_time,
+          timezone: values.timezone,
+        }),
+      })
+      message.success(`${configuring.email} 的专属配额和重置周期已保存`)
+      setConfiguring(null)
+      await Promise.all([qc.invalidateQueries({ queryKey: ['clients'] }), qc.invalidateQueries({ queryKey: ['policies'] }), qc.invalidateQueries({ queryKey: ['dashboard'] })])
+    } catch (error) {
+      message.error(`客户端配置保存失败：${errorText(error)}`)
+    } finally {
+      setConfigSaving(false)
+    }
+  }
+
   return <>
     <div className="heading clients-heading">
       <div>
@@ -278,9 +341,11 @@ function Clients() {
     <Table
       rowKey="id"
       loading={isFetching}
-      rowSelection={{ selectedRowKeys: selected, onChange: setSelected }}
+      rowSelection={{ selectedRowKeys: selected, onChange: setSelected, fixed: true }}
       dataSource={data}
+      scroll={{ x: 1680 }}
       columns={[
+        { title: '备注', dataIndex: 'local_remark', width: 150, fixed: 'left', render: (value, row: any) => <Input key={`${row.id}:${value || ''}`} defaultValue={value} maxLength={255} placeholder="原始节点/用途" onPressEnter={event => event.currentTarget.blur()} onBlur={event => saveRemark(row, event.target.value)} /> },
         { title: '节点', dataIndex: 'node' },
         { title: '邮箱标识', dataIndex: 'email' },
         { title: '入站', dataIndex: 'inbounds', render: value => value.map((item: any) => item.remark || item.remote_id).join('、') },
@@ -288,8 +353,10 @@ function Clients() {
         { title: '已用流量', dataIndex: 'used_bytes', render: fmtBytes },
         { title: '配额', dataIndex: 'quota_bytes', render: fmtQuota },
         { title: '使用率', dataIndex: 'percentage', render: value => value == null ? '—' : `${value}%` },
-        { title: '生效策略', dataIndex: 'policy', render: (value, row: any) => row.policy_conflict ? <Tag color="gold">策略冲突</Tag> : value || '无' },
-        { title: '警告', render: (_, row: any) => row.native_reset_conflict ? <Tag color="gold">原生重置冲突</Tag> : null },
+        { title: '客户端策略', width: 210, render: (_, row: any) => <Select allowClear value={row.assigned_policy_id ?? undefined} placeholder={row.policy ? `继承：${row.policy}` : '未设置'} style={{ width: 190 }} options={policies.filter((policy: any) => !policy.description?.startsWith('trafficmanager:client:') || policy.id === row.assigned_policy_id).map((policy: any) => ({ value: policy.id, label: policy.name }))} onChange={policyId => assignPolicy(row, policyId)} /> },
+        { title: '来源', dataIndex: 'policy_source', render: value => ({ CLIENT: '客户端', INBOUND: '入站', NODE: '节点', GLOBAL: '全局', NONE: '无' } as Record<string, string>)[value] || value },
+        { title: '警告', render: (_, row: any) => row.policy_conflict ? <Tag color="gold">策略冲突</Tag> : row.native_reset_conflict ? <Tag color="gold">原生重置冲突</Tag> : null },
+        { title: '操作', fixed: 'right', render: (_, row: any) => <Button onClick={() => openClientPolicy(row)}>单独配置</Button> },
       ]}
     />
     <Modal
@@ -313,6 +380,24 @@ function Clients() {
         </div>
         <Typography.Text type="secondary">入站总流量计数不会被修改。</Typography.Text>
       </Space>}
+    </Modal>
+    <Modal
+      title={configuring ? `单独配置：${configuring.local_remark || configuring.email}` : '单独配置客户端'}
+      open={Boolean(configuring)}
+      okText="保存专属策略"
+      cancelText="取消"
+      confirmLoading={configSaving}
+      onCancel={() => !configSaving && setConfiguring(null)}
+      onOk={() => clientPolicyForm.submit()}
+    >
+      <Alert className="selection-alert" type="info" showIcon message="保存后将建立客户端专属策略，优先于入站、节点和全局策略。配额会在下次自动周期或手动“开始新周期”时写入面板；只有“托管”模式会执行。" />
+      <Form form={clientPolicyForm} layout="vertical" onFinish={saveClientPolicy}>
+        <Form.Item name="quota_gib" label="配额（GiB，留空表示不限）"><InputNumber min={0} precision={2} style={{ width: '100%' }} /></Form.Item>
+        <Form.Item name="reset_enabled" label="每月自动重置" valuePropName="checked"><Switch /></Form.Item>
+        <Form.Item name="monthly_day" label="每月日期" rules={[{ required: true, message: '请输入每月日期' }]}><InputNumber min={1} max={31} style={{ width: '100%' }} /></Form.Item>
+        <Form.Item name="local_time" label="本地时间" rules={[{ required: true, message: '请输入执行时间' }]}><Input type="time" /></Form.Item>
+        <Form.Item name="timezone" label="IANA 时区" rules={[{ required: true, message: '请选择时区' }]}><Select showSearch options={['UTC', 'Asia/Shanghai', 'Asia/Tokyo', 'America/New_York', 'America/Los_Angeles', 'Europe/London', 'Europe/Berlin'].map(value => ({ value }))} /></Form.Item>
+      </Form>
     </Modal>
   </>
 }
@@ -357,16 +442,16 @@ function Policies() {
   const nodeNames = new Map(nodes.map((node: any) => [node.id, node.name]))
   return <>
     <Space className="heading"><Typography.Title level={2}>策略</Typography.Title><Button type="primary" onClick={() => setOpen(true)}>创建策略</Button></Space>
-    <Alert className="selection-alert" type="info" showIcon message="定时重置需要同时满足：策略已分配到目标节点，且该节点下的客户端处于“托管”模式。" />
+    <Alert className="selection-alert" type="info" showIcon message="节点分配可作为整台节点的默认策略；客户端页面可覆盖策略或直接设置专属配额和周期。定时任务只处理“托管”客户端。" />
     <Table rowKey="id" dataSource={data} columns={[
       { title: '名称', dataIndex: 'name' },
       { title: '配额', dataIndex: 'quota_bytes', render: fmtQuota },
       { title: '计划', render: (_, row: any) => row.reset_enabled ? `每月 ${row.monthly_day} 日 ${row.local_time}` : '已禁用' },
       { title: '时区', dataIndex: 'timezone' },
-      { title: '目标节点', dataIndex: 'node_ids', render: (value: number[]) => value?.length ? value.map(id => nodeNames.get(id) || `节点 #${id}`).join('、') : '未分配' },
+      { title: '分配范围', render: (_, row: any) => <Space direction="vertical" size={0}>{row.node_ids?.length ? <span>节点：{row.node_ids.map((id: number) => nodeNames.get(id) || `#${id}`).join('、')}</span> : null}{row.client_ids?.length ? <span>客户端：{row.client_ids.length} 个</span> : null}{!row.node_ids?.length && !row.client_ids?.length ? <span>未分配</span> : null}</Space> },
       { title: '下次执行', dataIndex: 'next_run_at', render: value => value ? new Date(value).toLocaleString('zh-CN') : '—' },
       { title: '启用', dataIndex: 'enabled', render: value => value ? <Tag color="green">是</Tag> : <Tag>否</Tag> },
-      { title: '操作', render: (_, row: any) => <Button onClick={() => { setAssigning(row); setAssignedNodeIds(row.node_ids || []) }}>分配节点</Button> },
+      { title: '操作', render: (_, row: any) => row.description?.startsWith('trafficmanager:client:') ? <Typography.Text type="secondary">客户端专属</Typography.Text> : <Button onClick={() => { setAssigning(row); setAssignedNodeIds(row.node_ids || []) }}>分配节点</Button> },
     ]} />
     <Modal title="创建策略" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="创建" cancelText="取消">
       <Form form={form} layout="vertical" onFinish={create}>
