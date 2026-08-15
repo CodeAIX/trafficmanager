@@ -20,7 +20,7 @@ from .database import Base, engine, get_db, utcnow
 from .models import Admin, AuditLog, Client, Inbound, JobItem, JobRun, Node, Policy, PolicyAssignment, WebSession
 from .policies import resolve_effective_policy
 from .security import encrypt_token, hash_password, new_session, verify_password
-from .services import audit, create_job, execute_job, probe_node, scheduler_loop, sync_node
+from .services import audit, create_job, execute_job, probe_node, scheduler_loop, sync_client_quota, sync_node
 
 Db = Annotated[Session, Depends(get_db)]
 stop_event = asyncio.Event()
@@ -354,6 +354,15 @@ def set_client_dedicated_policy(client_id: int, body: ClientPolicyInput, db: Db,
     return client_json(db, client)
 
 
+@app.post("/api/clients/{client_id}/sync-quota", dependencies=[Depends(require_csrf)])
+async def run_client_quota_sync(client_id: int, admin: AdminDep):
+    try:
+        return await sync_client_quota(client_id, admin.username)
+    except AdapterError as exc:
+        status = 404 if exc.code == "CLIENT_NOT_FOUND" else (409 if exc.code in {"CLIENT_NOT_MANAGED", "POLICY_CONFLICT", "NO_EFFECTIVE_POLICY"} else 502)
+        raise HTTPException(status, {"code": exc.code, "message": str(exc)}) from exc
+
+
 class JobRequest(BaseModel):
     client_ids: list[int] = []
     start_new_cycle: bool = False
@@ -422,6 +431,8 @@ def list_policies(db: Db, _admin: AdminDep):
 
 @app.post("/api/policies", status_code=201, dependencies=[Depends(require_csrf)])
 def add_policy(body: PolicyInput, db: Db, admin: AdminDep):
+    if db.scalar(select(Policy).where(Policy.name == body.name)):
+        raise HTTPException(409, "Policy name already exists")
     policy = Policy(**body.model_dump())
     if policy.enabled and policy.reset_enabled:
         policy.next_run_at = next_occurrence(utcnow(), policy.monthly_day, policy.local_time, policy.timezone, policy.missing_day_policy)
@@ -437,10 +448,15 @@ def update_policy(policy_id: int, body: PolicyInput, db: Db, admin: AdminDep):
     policy = db.get(Policy, policy_id)
     if not policy:
         raise HTTPException(404, "Policy not found")
+    duplicate = db.scalar(select(Policy).where(Policy.name == body.name, Policy.id != policy.id))
+    if duplicate:
+        raise HTTPException(409, "Policy name already exists")
+    before = {"name": policy.name, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "enabled": policy.enabled}
     for key, value in body.model_dump().items():
         setattr(policy, key, value)
     policy.next_run_at = next_occurrence(utcnow(), policy.monthly_day, policy.local_time, policy.timezone, policy.missing_day_policy) if policy.enabled and policy.reset_enabled else None
-    audit(db, "UPDATE_POLICY", "POLICY", policy.name, "SUCCESS", source="MANUAL", actor=admin.username)
+    after = {"name": policy.name, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "enabled": policy.enabled}
+    audit(db, "UPDATE_POLICY", "POLICY", policy.name, "SUCCESS", source="MANUAL", actor=admin.username, before=before, after=after)
     db.commit()
     return policy_json(db, policy)
 

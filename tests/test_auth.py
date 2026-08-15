@@ -65,6 +65,22 @@ def test_setup_session_is_recognized_by_auth_status():
         assert policies.status_code == 200
         assert policies.json()[0]["node_ids"] == [node.id]
 
+        renamed = client.put(
+            f"/api/policies/{policy_id}",
+            headers=headers,
+            json={
+                "name": "monthly-renamed",
+                "quota_bytes": 1000,
+                "reset_enabled": True,
+                "monthly_day": 1,
+                "local_time": "00:00",
+                "timezone": "UTC",
+                "enabled": True,
+            },
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["name"] == "monthly-renamed"
+
         updated = client.patch(
             f"/api/clients/{observed_id}",
             headers=headers,

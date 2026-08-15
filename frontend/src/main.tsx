@@ -117,6 +117,10 @@ function Auth({ children }: { children: React.ReactNode }) {
 
 const fmtBytes = (n?: number | null) => n == null ? '—' : `${(n / 1073741824).toFixed(n > 10737418240 ? 0 : 1)} GiB`
 const fmtQuota = (n?: number | null) => n == null || n === 0 ? '不限' : fmtBytes(n)
+const compareText = (left: unknown, right: unknown) => String(left ?? '').localeCompare(String(right ?? ''), 'zh-CN', { numeric: true })
+const textSorter = (key: string) => (left: any, right: any) => compareText(left[key], right[key])
+const numberSorter = (key: string) => (left: any, right: any) => Number(left[key] ?? -1) - Number(right[key] ?? -1)
+const dateSorter = (key: string) => (left: any, right: any) => new Date(left[key] || 0).getTime() - new Date(right[key] || 0).getTime()
 
 const statusTag = (value: string) => (
   <Tag color={value === 'ONLINE' || value === 'SUCCESS' ? 'green' : value === 'OBSERVE' || value === 'PARTIAL' ? 'gold' : value === 'MANAGED' || value === 'RUNNING' ? 'blue' : 'red'}>
@@ -161,14 +165,14 @@ function Nodes() {
       <Button type="primary" onClick={() => setOpen(true)}>添加节点</Button>
     </Space>
     <Table rowKey="id" dataSource={data} columns={[
-      { title: '状态', dataIndex: 'status', render: statusTag },
-      { title: '名称', dataIndex: 'name' },
-      { title: '备注', dataIndex: 'remark' },
-      { title: '基础地址', dataIndex: 'base_url' },
-      { title: 'API 模式', dataIndex: 'api_mode' },
-      { title: '入站数', dataIndex: 'inbounds' },
-      { title: '客户端数', dataIndex: 'clients' },
-      { title: 'TLS', dataIndex: 'tls_verify', render: value => value ? <Tag color="green">已验证</Tag> : <Tag color="red">已跳过</Tag> },
+      { title: '状态', dataIndex: 'status', sorter: textSorter('status'), render: statusTag },
+      { title: '名称', dataIndex: 'name', sorter: textSorter('name') },
+      { title: '备注', dataIndex: 'remark', sorter: textSorter('remark') },
+      { title: '基础地址', dataIndex: 'base_url', sorter: textSorter('base_url') },
+      { title: 'API 模式', dataIndex: 'api_mode', sorter: textSorter('api_mode') },
+      { title: '入站数', dataIndex: 'inbounds', sorter: numberSorter('inbounds') },
+      { title: '客户端数', dataIndex: 'clients', sorter: numberSorter('clients') },
+      { title: 'TLS', dataIndex: 'tls_verify', sorter: (left, right) => Number(left.tls_verify) - Number(right.tls_verify), render: value => value ? <Tag color="green">已验证</Tag> : <Tag color="red">已跳过</Tag> },
       { title: '操作', render: (_, row: any) => <Button onClick={async () => { try { await api(`/api/nodes/${row.id}/sync`, { method: 'POST' }); message.success('同步完成'); qc.invalidateQueries() } catch (error) { message.error(errorText(error)) } }}>同步</Button> },
     ]} />
     <Modal title="添加 3x-ui 节点" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={add.isPending} okText="添加" cancelText="取消">
@@ -202,6 +206,7 @@ function Clients() {
   const [executing, setExecuting] = useState(false)
   const [configuring, setConfiguring] = useState<any | null>(null)
   const [configSaving, setConfigSaving] = useState(false)
+  const [quotaSyncing, setQuotaSyncing] = useState<number | null>(null)
   const [clientPolicyForm] = Form.useForm()
   const selectedClients = useMemo(() => data.filter((client: any) => selected.includes(client.id)), [data, selected])
   const blocked = selectedClients.filter((client: any) => client.managed_mode !== 'MANAGED')
@@ -297,6 +302,7 @@ function Clients() {
       monthly_day: config.monthly_day ?? 1,
       local_time: config.local_time ?? '00:00',
       timezone: config.timezone ?? 'Asia/Shanghai',
+      sync_after_save: client.managed_mode === 'MANAGED',
     })
     setConfiguring(client)
   }
@@ -315,13 +321,35 @@ function Clients() {
           timezone: values.timezone,
         }),
       })
-      message.success(`${configuring.email} 的专属配额和重置周期已保存`)
+      let quotaSynced = false
+      if (values.sync_after_save) {
+        try {
+          await api(`/api/clients/${configuring.id}/sync-quota`, { method: 'POST' })
+          quotaSynced = true
+        } catch (error) {
+          message.warning(`专属策略已保存，但配额同步失败：${errorText(error)}`)
+        }
+      }
+      if (!values.sync_after_save || quotaSynced) message.success(quotaSynced ? `${configuring.email} 的专属策略已保存，配额已同步到源节点` : `${configuring.email} 的专属配额和重置周期已保存`)
       setConfiguring(null)
       await Promise.all([qc.invalidateQueries({ queryKey: ['clients'] }), qc.invalidateQueries({ queryKey: ['policies'] }), qc.invalidateQueries({ queryKey: ['dashboard'] })])
     } catch (error) {
       message.error(`客户端配置保存失败：${errorText(error)}`)
     } finally {
       setConfigSaving(false)
+    }
+  }
+
+  const syncQuota = async (client: any) => {
+    setQuotaSyncing(client.id)
+    try {
+      await api(`/api/clients/${client.id}/sync-quota`, { method: 'POST' })
+      message.success(`${client.email} 的配额已同步到源 3x-ui，现有流量未重置`)
+      await Promise.all([qc.invalidateQueries({ queryKey: ['clients'] }), qc.invalidateQueries({ queryKey: ['audit'] })])
+    } catch (error) {
+      message.error(`配额同步失败：${errorText(error)}`)
+    } finally {
+      setQuotaSyncing(null)
     }
   }
 
@@ -345,18 +373,18 @@ function Clients() {
       dataSource={data}
       scroll={{ x: 1680 }}
       columns={[
-        { title: '备注', dataIndex: 'local_remark', width: 150, fixed: 'left', render: (value, row: any) => <Input key={`${row.id}:${value || ''}`} defaultValue={value} maxLength={255} placeholder="原始节点/用途" onPressEnter={event => event.currentTarget.blur()} onBlur={event => saveRemark(row, event.target.value)} /> },
-        { title: '节点', dataIndex: 'node' },
-        { title: '邮箱标识', dataIndex: 'email' },
-        { title: '入站', dataIndex: 'inbounds', render: value => value.map((item: any) => item.remark || item.remote_id).join('、') },
-        { title: '管理模式', dataIndex: 'managed_mode', render: (value, row: any) => <Select value={value} style={{ width: 120 }} options={['MANAGED', 'OBSERVE', 'IGNORE'].map(item => ({ value: item, label: modeLabels[item] }))} onChange={mode => changeMode(row, mode)} /> },
-        { title: '已用流量', dataIndex: 'used_bytes', render: fmtBytes },
-        { title: '配额', dataIndex: 'quota_bytes', render: fmtQuota },
-        { title: '使用率', dataIndex: 'percentage', render: value => value == null ? '—' : `${value}%` },
-        { title: '客户端策略', width: 210, render: (_, row: any) => <Select allowClear value={row.assigned_policy_id ?? undefined} placeholder={row.policy ? `继承：${row.policy}` : '未设置'} style={{ width: 190 }} options={policies.filter((policy: any) => !policy.description?.startsWith('trafficmanager:client:') || policy.id === row.assigned_policy_id).map((policy: any) => ({ value: policy.id, label: policy.name }))} onChange={policyId => assignPolicy(row, policyId)} /> },
-        { title: '来源', dataIndex: 'policy_source', render: value => ({ CLIENT: '客户端', INBOUND: '入站', NODE: '节点', GLOBAL: '全局', NONE: '无' } as Record<string, string>)[value] || value },
+        { title: '备注', dataIndex: 'local_remark', width: 150, fixed: 'left', sorter: textSorter('local_remark'), render: (value, row: any) => <Input key={`${row.id}:${value || ''}`} defaultValue={value} maxLength={255} placeholder="原始节点/用途" onPressEnter={event => event.currentTarget.blur()} onBlur={event => saveRemark(row, event.target.value)} /> },
+        { title: '节点', dataIndex: 'node', sorter: textSorter('node') },
+        { title: '邮箱标识', dataIndex: 'email', sorter: textSorter('email') },
+        { title: '入站', dataIndex: 'inbounds', sorter: (left, right) => compareText(left.inbounds?.map((item: any) => item.remark).join('、'), right.inbounds?.map((item: any) => item.remark).join('、')), render: value => value.map((item: any) => item.remark || item.remote_id).join('、') },
+        { title: '管理模式', dataIndex: 'managed_mode', sorter: textSorter('managed_mode'), render: (value, row: any) => <Select value={value} style={{ width: 120 }} options={['MANAGED', 'OBSERVE', 'IGNORE'].map(item => ({ value: item, label: modeLabels[item] }))} onChange={mode => changeMode(row, mode)} /> },
+        { title: '已用流量', dataIndex: 'used_bytes', sorter: numberSorter('used_bytes'), render: fmtBytes },
+        { title: '配额', dataIndex: 'quota_bytes', sorter: numberSorter('quota_bytes'), render: fmtQuota },
+        { title: '使用率', dataIndex: 'percentage', sorter: numberSorter('percentage'), render: value => value == null ? '—' : `${value}%` },
+        { title: '客户端策略', width: 210, sorter: textSorter('policy'), render: (_, row: any) => <Select allowClear value={row.assigned_policy_id ?? undefined} placeholder={row.policy ? `继承：${row.policy}` : '未设置'} style={{ width: 190 }} options={policies.filter((policy: any) => !policy.description?.startsWith('trafficmanager:client:') || policy.id === row.assigned_policy_id).map((policy: any) => ({ value: policy.id, label: policy.name }))} onChange={policyId => assignPolicy(row, policyId)} /> },
+        { title: '来源', dataIndex: 'policy_source', sorter: textSorter('policy_source'), render: value => ({ CLIENT: '客户端', INBOUND: '入站', NODE: '节点', GLOBAL: '全局', NONE: '无' } as Record<string, string>)[value] || value },
         { title: '警告', render: (_, row: any) => row.policy_conflict ? <Tag color="gold">策略冲突</Tag> : row.native_reset_conflict ? <Tag color="gold">原生重置冲突</Tag> : null },
-        { title: '操作', fixed: 'right', render: (_, row: any) => <Button onClick={() => openClientPolicy(row)}>单独配置</Button> },
+        { title: '操作', fixed: 'right', width: 190, render: (_, row: any) => <Space><Button onClick={() => openClientPolicy(row)}>单独配置</Button><Button disabled={row.managed_mode !== 'MANAGED' || !row.policy || row.policy_conflict} loading={quotaSyncing === row.id} onClick={() => syncQuota(row)}>同步配额</Button></Space> },
       ]}
     />
     <Modal
@@ -397,6 +425,7 @@ function Clients() {
         <Form.Item name="monthly_day" label="每月日期" rules={[{ required: true, message: '请输入每月日期' }]}><InputNumber min={1} max={31} style={{ width: '100%' }} /></Form.Item>
         <Form.Item name="local_time" label="本地时间" rules={[{ required: true, message: '请输入执行时间' }]}><Input type="time" /></Form.Item>
         <Form.Item name="timezone" label="IANA 时区" rules={[{ required: true, message: '请选择时区' }]}><Select showSearch options={['UTC', 'Asia/Shanghai', 'Asia/Tokyo', 'America/New_York', 'America/Los_Angeles', 'Europe/London', 'Europe/Berlin'].map(value => ({ value }))} /></Form.Item>
+        <Form.Item name="sync_after_save" label="保存后立即同步配额到源节点" valuePropName="checked"><Switch disabled={configuring?.managed_mode !== 'MANAGED'} /></Form.Item>
       </Form>
     </Modal>
   </>
@@ -411,7 +440,10 @@ function Policies() {
   const [assigning, setAssigning] = useState<any | null>(null)
   const [assignedNodeIds, setAssignedNodeIds] = useState<number[]>([])
   const [assigningLoading, setAssigningLoading] = useState(false)
+  const [editing, setEditing] = useState<any | null>(null)
+  const [editLoading, setEditLoading] = useState(false)
   const [form] = Form.useForm()
+  const [editForm] = Form.useForm()
   const create = async (values: any) => {
     try {
       const { node_ids = [], quota_gib, ...policyValues } = values
@@ -439,19 +471,61 @@ function Policies() {
       setAssigningLoading(false)
     }
   }
+  const openEdit = (policy: any) => {
+    editForm.setFieldsValue({
+      name: policy.name,
+      quota_gib: policy.quota_bytes == null ? null : policy.quota_bytes / 1073741824,
+      reset_enabled: policy.reset_enabled,
+      monthly_day: policy.monthly_day,
+      local_time: policy.local_time,
+      timezone: policy.timezone,
+      enabled: policy.enabled,
+    })
+    setEditing(policy)
+  }
+  const saveEdit = async (values: any) => {
+    if (!editing) return
+    setEditLoading(true)
+    try {
+      await api(`/api/policies/${editing.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: values.name,
+          description: editing.description || '',
+          quota_bytes: values.quota_gib == null ? null : Math.round(Number(values.quota_gib) * 1073741824),
+          reset_enabled: values.reset_enabled ?? false,
+          monthly_day: values.monthly_day,
+          local_time: values.local_time,
+          timezone: values.timezone,
+          missing_day_policy: editing.missing_day_policy || 'LAST_DAY',
+          catchup_enabled: editing.catchup_enabled ?? true,
+          catchup_max_hours: editing.catchup_max_hours ?? 168,
+          reactivate_mode: editing.reactivate_mode || 'PRESERVE',
+          enabled: values.enabled ?? false,
+        }),
+      })
+      message.success('策略已更新')
+      setEditing(null)
+      await Promise.all([qc.invalidateQueries({ queryKey: ['policies'] }), qc.invalidateQueries({ queryKey: ['clients'] }), qc.invalidateQueries({ queryKey: ['dashboard'] })])
+    } catch (error) {
+      message.error(`策略更新失败：${errorText(error)}`)
+    } finally {
+      setEditLoading(false)
+    }
+  }
   const nodeNames = new Map(nodes.map((node: any) => [node.id, node.name]))
   return <>
     <Space className="heading"><Typography.Title level={2}>策略</Typography.Title><Button type="primary" onClick={() => setOpen(true)}>创建策略</Button></Space>
     <Alert className="selection-alert" type="info" showIcon message="节点分配可作为整台节点的默认策略；客户端页面可覆盖策略或直接设置专属配额和周期。定时任务只处理“托管”客户端。" />
     <Table rowKey="id" dataSource={data} columns={[
-      { title: '名称', dataIndex: 'name' },
-      { title: '配额', dataIndex: 'quota_bytes', render: fmtQuota },
-      { title: '计划', render: (_, row: any) => row.reset_enabled ? `每月 ${row.monthly_day} 日 ${row.local_time}` : '已禁用' },
-      { title: '时区', dataIndex: 'timezone' },
-      { title: '分配范围', render: (_, row: any) => <Space direction="vertical" size={0}>{row.node_ids?.length ? <span>节点：{row.node_ids.map((id: number) => nodeNames.get(id) || `#${id}`).join('、')}</span> : null}{row.client_ids?.length ? <span>客户端：{row.client_ids.length} 个</span> : null}{!row.node_ids?.length && !row.client_ids?.length ? <span>未分配</span> : null}</Space> },
-      { title: '下次执行', dataIndex: 'next_run_at', render: value => value ? new Date(value).toLocaleString('zh-CN') : '—' },
-      { title: '启用', dataIndex: 'enabled', render: value => value ? <Tag color="green">是</Tag> : <Tag>否</Tag> },
-      { title: '操作', render: (_, row: any) => row.description?.startsWith('trafficmanager:client:') ? <Typography.Text type="secondary">客户端专属</Typography.Text> : <Button onClick={() => { setAssigning(row); setAssignedNodeIds(row.node_ids || []) }}>分配节点</Button> },
+      { title: '名称', dataIndex: 'name', sorter: textSorter('name') },
+      { title: '配额', dataIndex: 'quota_bytes', sorter: numberSorter('quota_bytes'), render: fmtQuota },
+      { title: '计划', sorter: (left, right) => (left.monthly_day * 1440 + Number(left.local_time?.slice(0, 2)) * 60 + Number(left.local_time?.slice(3, 5))) - (right.monthly_day * 1440 + Number(right.local_time?.slice(0, 2)) * 60 + Number(right.local_time?.slice(3, 5))), render: (_, row: any) => row.reset_enabled ? `每月 ${row.monthly_day} 日 ${row.local_time}` : '已禁用' },
+      { title: '时区', dataIndex: 'timezone', sorter: textSorter('timezone') },
+      { title: '分配范围', sorter: (left, right) => (left.node_ids?.length + left.client_ids?.length) - (right.node_ids?.length + right.client_ids?.length), render: (_, row: any) => <Space direction="vertical" size={0}>{row.node_ids?.length ? <span>节点：{row.node_ids.map((id: number) => nodeNames.get(id) || `#${id}`).join('、')}</span> : null}{row.client_ids?.length ? <span>客户端：{row.client_ids.length} 个</span> : null}{!row.node_ids?.length && !row.client_ids?.length ? <span>未分配</span> : null}</Space> },
+      { title: '下次执行', dataIndex: 'next_run_at', sorter: dateSorter('next_run_at'), render: value => value ? new Date(value).toLocaleString('zh-CN') : '—' },
+      { title: '启用', dataIndex: 'enabled', sorter: (left, right) => Number(left.enabled) - Number(right.enabled), render: value => value ? <Tag color="green">是</Tag> : <Tag>否</Tag> },
+      { title: '操作', render: (_, row: any) => <Space><Button onClick={() => openEdit(row)}>编辑</Button>{row.description?.startsWith('trafficmanager:client:') ? <Typography.Text type="secondary">客户端专属</Typography.Text> : <Button onClick={() => { setAssigning(row); setAssignedNodeIds(row.node_ids || []) }}>分配节点</Button>}</Space> },
     ]} />
     <Modal title="创建策略" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="创建" cancelText="取消">
       <Form form={form} layout="vertical" onFinish={create}>
@@ -467,6 +541,17 @@ function Policies() {
     <Modal title={assigning ? `为“${assigning.name}”分配节点` : '分配节点'} open={Boolean(assigning)} okText="保存" cancelText="取消" confirmLoading={assigningLoading} onOk={saveAssignments} onCancel={() => setAssigning(null)}>
       <Alert type="warning" showIcon message="策略只会操作目标节点下处于“托管”模式的客户端。观察和忽略模式不会被修改。" />
       <Select mode="multiple" value={assignedNodeIds} onChange={setAssignedNodeIds} style={{ width: '100%', marginTop: 16 }} placeholder="选择目标节点" options={nodes.map((node: any) => ({ value: node.id, label: node.name }))} />
+    </Modal>
+    <Modal title={editing ? `编辑策略：${editing.name}` : '编辑策略'} open={Boolean(editing)} okText="保存" cancelText="取消" confirmLoading={editLoading} onOk={() => editForm.submit()} onCancel={() => setEditing(null)}>
+      <Form form={editForm} layout="vertical" onFinish={saveEdit}>
+        <Form.Item name="name" label="策略名称" rules={[{ required: true, message: '请输入策略名称' }]}><Input maxLength={120} /></Form.Item>
+        <Form.Item name="quota_gib" label="配额（GiB，留空表示不限）"><InputNumber min={0} precision={2} style={{ width: '100%' }} /></Form.Item>
+        <Form.Item name="reset_enabled" label="每月重置" valuePropName="checked"><Switch /></Form.Item>
+        <Form.Item name="monthly_day" label="日期" rules={[{ required: true }]}><InputNumber min={1} max={31} style={{ width: '100%' }} /></Form.Item>
+        <Form.Item name="local_time" label="本地时间" rules={[{ required: true }]}><Input type="time" /></Form.Item>
+        <Form.Item name="timezone" label="IANA 时区" rules={[{ required: true }]}><Select showSearch options={['UTC', 'Asia/Shanghai', 'Asia/Tokyo', 'America/New_York', 'America/Los_Angeles', 'Europe/London', 'Europe/Berlin'].map(value => ({ value }))} /></Form.Item>
+        <Form.Item name="enabled" label="启用策略" valuePropName="checked"><Switch /></Form.Item>
+      </Form>
     </Modal>
   </>
 }
@@ -487,14 +572,14 @@ function Jobs() {
     }
   }
   return <><Typography.Title level={2}>任务</Typography.Title><Table rowKey="id" dataSource={data} columns={[
-    { title: 'ID', dataIndex: 'id' },
-    { title: '类型', dataIndex: 'type', render: value => ({ RESET_TRAFFIC: '重置流量', MONTHLY_CYCLE: '开始新周期' }[value as string] || value) },
-    { title: '来源', dataIndex: 'source', render: value => ({ MANUAL: '手动', SCHEDULED: '计划任务', RETRY: '重试' }[value as string] || value) },
-    { title: '状态', dataIndex: 'status', render: statusTag },
-    { title: '目标数', dataIndex: 'total_targets' },
-    { title: '成功', dataIndex: 'success_count' },
-    { title: '失败', dataIndex: 'failure_count' },
-    { title: '创建时间', dataIndex: 'created_at', render: value => new Date(value).toLocaleString('zh-CN') },
+    { title: 'ID', dataIndex: 'id', sorter: numberSorter('id') },
+    { title: '类型', dataIndex: 'type', sorter: textSorter('type'), render: value => ({ RESET_TRAFFIC: '重置流量', MONTHLY_CYCLE: '开始新周期' }[value as string] || value) },
+    { title: '来源', dataIndex: 'source', sorter: textSorter('source'), render: value => ({ MANUAL: '手动', SCHEDULED: '计划任务', RETRY: '重试' }[value as string] || value) },
+    { title: '状态', dataIndex: 'status', sorter: textSorter('status'), render: statusTag },
+    { title: '目标数', dataIndex: 'total_targets', sorter: numberSorter('total_targets') },
+    { title: '成功', dataIndex: 'success_count', sorter: numberSorter('success_count') },
+    { title: '失败', dataIndex: 'failure_count', sorter: numberSorter('failure_count') },
+    { title: '创建时间', dataIndex: 'created_at', sorter: dateSorter('created_at'), defaultSortOrder: 'descend', render: value => new Date(value).toLocaleString('zh-CN') },
     { title: '摘要', render: (_, row: any) => `${row.success_count} 成功，${row.failure_count} 失败` },
     { title: '操作', render: (_, row: any) => <Button loading={detailLoading} onClick={() => showDetail(row.id)}>详情</Button> },
   ]} />
@@ -507,11 +592,11 @@ function Jobs() {
           { key: 'finished', label: '完成时间', children: detail.finished_at ? new Date(detail.finished_at).toLocaleString('zh-CN') : '—' },
         ]} />
         <Table className="job-items" rowKey="id" pagination={false} dataSource={detail.items || []} columns={[
-          { title: '客户端 ID', dataIndex: 'client_id' },
-          { title: '节点 ID', dataIndex: 'node_id' },
-          { title: '状态', dataIndex: 'status', render: statusTag },
-          { title: '尝试次数', dataIndex: 'attempt_count' },
-          { title: '错误详情', dataIndex: 'error', render: value => value || '—' },
+          { title: '客户端 ID', dataIndex: 'client_id', sorter: numberSorter('client_id') },
+          { title: '节点 ID', dataIndex: 'node_id', sorter: numberSorter('node_id') },
+          { title: '状态', dataIndex: 'status', sorter: textSorter('status'), render: statusTag },
+          { title: '尝试次数', dataIndex: 'attempt_count', sorter: numberSorter('attempt_count') },
+          { title: '错误详情', dataIndex: 'error', sorter: textSorter('error'), render: value => value || '—' },
         ]} />
       </>}
     </Modal>
@@ -521,12 +606,12 @@ function Jobs() {
 function Audit() {
   const { data = [] } = useQuery({ queryKey: ['audit'], queryFn: () => api('/api/audit') })
   return <><Typography.Title level={2}>审计日志</Typography.Title><Table rowKey="id" dataSource={data} columns={[
-    { title: '时间', dataIndex: 'timestamp', render: value => new Date(value).toLocaleString('zh-CN') },
-    { title: '操作者', dataIndex: 'actor' },
-    { title: '来源', dataIndex: 'source' },
-    { title: '操作', dataIndex: 'action' },
-    { title: '目标', dataIndex: 'target' },
-    { title: '结果', dataIndex: 'result', render: statusTag },
+    { title: '时间', dataIndex: 'timestamp', sorter: dateSorter('timestamp'), defaultSortOrder: 'descend', render: value => new Date(value).toLocaleString('zh-CN') },
+    { title: '操作者', dataIndex: 'actor', sorter: textSorter('actor') },
+    { title: '来源', dataIndex: 'source', sorter: textSorter('source') },
+    { title: '操作', dataIndex: 'action', sorter: textSorter('action') },
+    { title: '目标', dataIndex: 'target', sorter: textSorter('target') },
+    { title: '结果', dataIndex: 'result', sorter: textSorter('result'), render: statusTag },
   ]} /></>
 }
 

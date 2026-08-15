@@ -120,6 +120,63 @@ def create_job(db: Session, job_type: str, source: str, client_ids: list[int], p
     return job
 
 
+async def sync_client_quota(client_id: int, actor: str = "system") -> dict:
+    node_id = 0
+    result: dict = {}
+    with SessionLocal() as db:
+        client = db.get(Client, client_id)
+        if not client or client.remote_missing:
+            raise AdapterError("CLIENT_NOT_FOUND", "Client is missing from the source node")
+        if client.managed_mode != "MANAGED":
+            raise AdapterError("CLIENT_NOT_MANAGED", "Client must be Managed before syncing quota")
+        effective = resolve_effective_policy(db, client)
+        if effective.conflict:
+            raise AdapterError("POLICY_CONFLICT", "Client has conflicting policies")
+        if not effective.policy:
+            raise AdapterError("NO_EFFECTIVE_POLICY", "Client has no effective policy")
+        desired_quota = int(effective.policy.quota_bytes or 0)
+        node = db.get(Node, client.node_id)
+        node_id = node.id
+        node_name, email = node.name, client.email
+        inbound_ids = sorted({inbound.remote_id for inbound in client.inbounds})
+        operation_inbounds = [None] if node.api_mode == "MODERN" else (inbound_ids or [None])
+        adapter = adapter_for(node.api_mode, node.base_url, decrypt_token(node.token_ciphertext, node.token_nonce), node.tls_verify)
+        key = f"{client.node_id}:{client.email}"
+        try:
+            async with client_locks[key]:
+                before_clients = [await adapter.get_client(email, inbound_id) for inbound_id in operation_inbounds]
+                before_quotas = [int(item.get("totalGB", item.get("total", 0)) or 0) for item in before_clients]
+                for inbound_id, before_quota in zip(operation_inbounds, before_quotas, strict=True):
+                    if before_quota != desired_quota:
+                        await adapter.update_client_quota(email, desired_quota, inbound_id)
+                verified_clients: list[dict] = []
+                for wait in (0.05, 2, 5):
+                    await asyncio.sleep(wait)
+                    verified_clients = [await adapter.get_client(email, inbound_id) for inbound_id in operation_inbounds]
+                    if all(int(item.get("totalGB", item.get("total", 0)) or 0) == desired_quota for item in verified_clients):
+                        break
+                else:
+                    raise AdapterError("VERIFY_FAILED", "Quota did not match after synchronization")
+                client.quota_remote_bytes = desired_quota
+                client.last_synced_at = utcnow()
+                client.sync_status = "OK"
+                result = {"client_id": client.id, "quota_bytes": desired_quota, "before_quota_bytes": max(before_quotas, default=0)}
+                audit(db, "SYNC_CLIENT_QUOTA", "CLIENT", f"{node_name}/{email}", "SUCCESS", source="MANUAL", actor=actor, before={"quota": result["before_quota_bytes"]}, after={"quota": desired_quota})
+                db.commit()
+        except Exception as exc:
+            client.sync_status = "QUOTA_SYNC_FAILED"
+            audit(db, "SYNC_CLIENT_QUOTA", "CLIENT", f"{node_name}/{email}", exc.code if isinstance(exc, AdapterError) else "FAILED", source="MANUAL", actor=actor)
+            db.commit()
+            raise
+        finally:
+            await adapter.close()
+    try:
+        await sync_node(node_id)
+    except Exception:
+        pass
+    return result
+
+
 async def _execute_item(job_id: int, item_id: int) -> bool:
     with SessionLocal() as db:
         job, item = db.get(JobRun, job_id), db.get(JobItem, item_id)
@@ -132,7 +189,7 @@ async def _execute_item(job_id: int, item_id: int) -> bool:
             db.commit()
             node = db.get(Node, client.node_id)
             effective = resolve_effective_policy(db, client)
-            desired_quota = effective.policy.quota_bytes if job.type == "MONTHLY_CYCLE" and effective.policy else None
+            desired_quota = int(effective.policy.quota_bytes or 0) if job.type == "MONTHLY_CYCLE" and effective.policy else None
             inbound_ids = [i.remote_id for i in client.inbounds]
             adapter = adapter_for(node.api_mode, node.base_url, decrypt_token(node.token_ciphertext, node.token_nonce), node.tls_verify)
             try:
