@@ -8,6 +8,7 @@ import {
   Button,
   Card,
   ConfigProvider,
+  Descriptions,
   Form,
   Input,
   InputNumber,
@@ -341,18 +342,50 @@ function Policies() {
 }
 
 function Jobs() {
+  const { message } = AntApp.useApp()
   const { data = [] } = useQuery({ queryKey: ['jobs'], queryFn: () => api('/api/jobs'), refetchInterval: 5000 })
+  const [detail, setDetail] = useState<any | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const showDetail = async (jobId: number) => {
+    setDetailLoading(true)
+    try {
+      setDetail(await api(`/api/jobs/${jobId}`))
+    } catch (error) {
+      message.error(`任务详情加载失败：${errorText(error)}`)
+    } finally {
+      setDetailLoading(false)
+    }
+  }
   return <><Typography.Title level={2}>任务</Typography.Title><Table rowKey="id" dataSource={data} columns={[
     { title: 'ID', dataIndex: 'id' },
-    { title: '类型', dataIndex: 'type' },
-    { title: '来源', dataIndex: 'source' },
+    { title: '类型', dataIndex: 'type', render: value => ({ RESET_TRAFFIC: '重置流量', MONTHLY_CYCLE: '开始新周期' }[value as string] || value) },
+    { title: '来源', dataIndex: 'source', render: value => ({ MANUAL: '手动', SCHEDULED: '计划任务', RETRY: '重试' }[value as string] || value) },
     { title: '状态', dataIndex: 'status', render: statusTag },
     { title: '目标数', dataIndex: 'total_targets' },
     { title: '成功', dataIndex: 'success_count' },
     { title: '失败', dataIndex: 'failure_count' },
     { title: '创建时间', dataIndex: 'created_at', render: value => new Date(value).toLocaleString('zh-CN') },
-    { title: '摘要', dataIndex: 'summary' },
-  ]} /></>
+    { title: '摘要', render: (_, row: any) => `${row.success_count} 成功，${row.failure_count} 失败` },
+    { title: '操作', render: (_, row: any) => <Button loading={detailLoading} onClick={() => showDetail(row.id)}>详情</Button> },
+  ]} />
+    <Modal title={detail ? `任务 #${detail.id} 详情` : '任务详情'} open={Boolean(detail)} width={960} footer={null} onCancel={() => setDetail(null)}>
+      {detail && <>
+        <Descriptions bordered size="small" column={2} items={[
+          { key: 'type', label: '类型', children: ({ RESET_TRAFFIC: '重置流量', MONTHLY_CYCLE: '开始新周期' }[detail.type as string] || detail.type) },
+          { key: 'status', label: '状态', children: statusTag(detail.status) },
+          { key: 'created', label: '创建时间', children: new Date(detail.created_at).toLocaleString('zh-CN') },
+          { key: 'finished', label: '完成时间', children: detail.finished_at ? new Date(detail.finished_at).toLocaleString('zh-CN') : '—' },
+        ]} />
+        <Table className="job-items" rowKey="id" pagination={false} dataSource={detail.items || []} columns={[
+          { title: '客户端 ID', dataIndex: 'client_id' },
+          { title: '节点 ID', dataIndex: 'node_id' },
+          { title: '状态', dataIndex: 'status', render: statusTag },
+          { title: '尝试次数', dataIndex: 'attempt_count' },
+          { title: '错误详情', dataIndex: 'error', render: value => value || '—' },
+        ]} />
+      </>}
+    </Modal>
+  </>
 }
 
 function Audit() {

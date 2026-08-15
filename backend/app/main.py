@@ -438,4 +438,6 @@ if static_dir.exists():
     @app.get("/{path:path}", include_in_schema=False)
     def spa(path: str):
         candidate = static_dir / path
-        return FileResponse(candidate if candidate.is_file() else static_dir / "index.html")
+        response_path = candidate if candidate.is_file() else static_dir / "index.html"
+        headers = {"Cache-Control": "no-cache"} if response_path.name == "index.html" else None
+        return FileResponse(response_path, headers=headers)
