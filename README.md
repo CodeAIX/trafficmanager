@@ -34,14 +34,13 @@ Open `http://SERVER:2096`. The first page requires creation of an administrator;
 
 ## 使用方法
 
-源码仓库 [CodeAIX/trafficmanager](https://github.com/CodeAIX/trafficmanager) 已公开，无需登录 GitHub 即可克隆。当前 GHCR 镜像包仍需 GitHub 身份认证；如果不希望配置 GHCR Token，请直接使用下面的公开源码 Compose 方式构建。
+源码仓库 [CodeAIX/trafficmanager](https://github.com/CodeAIX/trafficmanager) 和 GHCR 镜像均已公开。克隆源码或拉取镜像都不需要 GitHub 账号、Token 或 `docker login`。
 
 ### 直接使用 GitHub Container Registry 镜像
 
-使用具有 `read:packages` 权限的 GitHub Personal Access Token 登录 GHCR，然后拉取镜像：
+无需认证，直接拉取镜像：
 
 ```bash
-echo "$GHCR_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
 docker pull ghcr.io/codeaix/trafficmanager:latest
 ```
 
