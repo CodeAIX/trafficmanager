@@ -139,10 +139,11 @@ async def _execute_item(job_id: int, item_id: int) -> bool:
                 before = await adapter.get_client(client.email, inbound_ids[0] if inbound_ids else None)
                 item.before_quota = int(before.get("totalGB", before.get("total", 0)) or 0)
                 item.before_up, item.before_down = int(before.get("up", 0) or 0), int(before.get("down", 0) or 0)
+                operation_inbounds = [None] if node.api_mode == "MODERN" else (inbound_ids or [None])
                 if desired_quota is not None and item.before_quota != desired_quota:
-                    for inbound_id in inbound_ids or [None]:
+                    for inbound_id in operation_inbounds:
                         await adapter.update_client_quota(client.email, desired_quota, inbound_id)
-                for inbound_id in inbound_ids or [None]:
+                for inbound_id in operation_inbounds:
                     await adapter.reset_client_traffic(client.email, inbound_id)
                 verified = None
                 for wait in (0.05, 2, 5):

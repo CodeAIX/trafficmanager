@@ -4,7 +4,7 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -171,20 +171,32 @@ class LegacyThreeXUIAdapter(ThreeXUIAdapter):
 
 
 class ModernThreeXUIAdapter(LegacyThreeXUIAdapter):
+    @staticmethod
+    def _email_path(email: str) -> str:
+        return quote(email, safe="")
+
     async def get_client(self, email: str, inbound_id: int | None = None) -> dict[str, Any]:
         try:
-            return await self._request("GET", f"/panel/api/clients/{email}")
+            encoded = self._email_path(email)
+            result = await self._request("GET", f"/panel/api/clients/get/{encoded}")
+            client = dict(result.get("client", result)) if isinstance(result, dict) else {}
+            traffic = await self._request("GET", f"/panel/api/clients/traffic/{encoded}")
+            if isinstance(traffic, dict):
+                client["up"] = int(traffic.get("up", 0) or 0)
+                client["down"] = int(traffic.get("down", 0) or 0)
+            return client
         except AdapterError as exc:
             if exc.status_code != 404:
                 raise
             return await super().get_client(email, inbound_id)
 
     async def update_client_quota(self, email: str, quota_bytes: int, inbound_id: int | None = None) -> dict[str, Any]:
-        current = await self.get_client(email, inbound_id)
-        payload = dict(current)
-        payload["totalGB"] = int(quota_bytes)
         try:
-            await self._request("POST", f"/panel/api/clients/{email}", json=payload)
+            encoded = self._email_path(email)
+            result = await self._request("GET", f"/panel/api/clients/get/{encoded}")
+            payload = dict(result.get("client", result)) if isinstance(result, dict) else {}
+            payload["totalGB"] = int(quota_bytes)
+            await self._request("POST", f"/panel/api/clients/update/{encoded}", json=payload)
             return await self.get_client(email, inbound_id)
         except AdapterError as exc:
             if exc.status_code != 404:
@@ -193,7 +205,7 @@ class ModernThreeXUIAdapter(LegacyThreeXUIAdapter):
 
     async def reset_client_traffic(self, email: str, inbound_id: int | None = None) -> None:
         try:
-            await self._request("POST", f"/panel/api/clients/{email}/resetTraffic")
+            await self._request("POST", f"/panel/api/clients/resetTraffic/{self._email_path(email)}")
         except AdapterError as exc:
             if exc.status_code != 404:
                 raise
@@ -228,4 +240,3 @@ async def detect_adapter(base_url: str, token: str, tls_verify: bool = True, tra
 
 def adapter_for(mode: str, base_url: str, token: str, tls_verify: bool = True) -> ThreeXUIAdapter:
     return (ModernThreeXUIAdapter if mode == "MODERN" else LegacyThreeXUIAdapter)(base_url, token, tls_verify)
-

@@ -14,25 +14,30 @@ def create_mock(reset_works: bool = True) -> FastAPI:
     @app.get("/base/panel/api/openapi.json")
     def openapi(authorization: str | None = Header(default=None)):
         auth(authorization)
-        return {"paths": {"/panel/api/clients/{email}": {}, "/panel/api/clients/{email}/resetTraffic": {}, "/panel/api/inbounds/list": {}}}
+        return {"paths": {"/panel/api/clients/get/{email}": {}, "/panel/api/clients/resetTraffic/{email}": {}, "/panel/api/inbounds/list": {}}}
 
     @app.get("/base/panel/api/inbounds/list")
     def inbounds(authorization: str | None = Header(default=None)):
         auth(authorization)
         return {"success": True, "obj": [deepcopy(inbound)]}
 
-    @app.get("/base/panel/api/clients/{email}")
+    @app.get("/base/panel/api/clients/get/{email}")
     def get_client(email: str, authorization: str | None = Header(default=None)):
         auth(authorization)
-        return {"success": True, "obj": deepcopy(client)}
+        return {"success": True, "obj": {"client": deepcopy(client), "inboundIds": [1], "usedTraffic": client["up"] + client["down"]}}
 
-    @app.post("/base/panel/api/clients/{email}")
+    @app.get("/base/panel/api/clients/traffic/{email}")
+    def get_traffic(email: str, authorization: str | None = Header(default=None)):
+        auth(authorization)
+        return {"success": True, "obj": {"email": email, "up": client["up"], "down": client["down"]}}
+
+    @app.post("/base/panel/api/clients/update/{email}")
     def update_client(email: str, body: dict, authorization: str | None = Header(default=None)):
         auth(authorization)
         client.update(body)
         return {"success": True}
 
-    @app.post("/base/panel/api/clients/{email}/resetTraffic")
+    @app.post("/base/panel/api/clients/resetTraffic/{email}")
     def reset(email: str, authorization: str | None = Header(default=None)):
         auth(authorization)
         if reset_works:
@@ -40,4 +45,3 @@ def create_mock(reset_works: bool = True) -> FastAPI:
         return {"success": True}
 
     return app
-
