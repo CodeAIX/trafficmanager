@@ -18,7 +18,7 @@ COPY migrations /app/migrations
 COPY alembic.ini /app/alembic.ini
 COPY --from=frontend-build /build/frontend/dist/ /app/backend/app/static/
 USER fleet
-EXPOSE 8000
+EXPOSE 2096
 VOLUME ["/data"]
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --workers 1"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2096/health', timeout=3)"]
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn backend.app.main:app --host 0.0.0.0 --port 2096 --workers 1"]
