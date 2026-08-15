@@ -97,6 +97,12 @@ def session_hash(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def utc_json(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
 def current_admin(db: Db, trafficmanager_session: str | None = Cookie(default=None)) -> Admin:
     if not trafficmanager_session:
         raise HTTPException(401, "Authentication required")
@@ -118,14 +124,14 @@ def require_csrf(request: Request, db: Db, trafficmanager_session: str | None = 
 
 
 def node_json(node: Node) -> dict[str, Any]:
-    return {"id": node.id, "name": node.name, "remark": node.remark, "base_url": node.base_url, "tokenConfigured": True, "enabled": node.enabled, "tls_verify": node.tls_verify, "tags": node.tags, "status": node.status, "last_seen_at": node.last_seen_at, "last_error": node.last_error, "api_mode": node.api_mode, "capabilities": node.capabilities_json, "openapi_sha256": node.openapi_sha256, "inbounds": len(node.inbounds), "clients": len(node.clients)}
+    return {"id": node.id, "name": node.name, "remark": node.remark, "base_url": node.base_url, "tokenConfigured": True, "enabled": node.enabled, "tls_verify": node.tls_verify, "tags": node.tags, "status": node.status, "last_seen_at": utc_json(node.last_seen_at), "last_error": node.last_error, "api_mode": node.api_mode, "capabilities": node.capabilities_json, "openapi_sha256": node.openapi_sha256, "inbounds": len(node.inbounds), "clients": len(node.clients)}
 
 
 def client_json(db: Session, client: Client) -> dict[str, Any]:
     effective = resolve_effective_policy(db, client)
     used = client.upload_bytes + client.download_bytes
     quota = effective.policy.quota_bytes if effective.policy else client.quota_remote_bytes
-    return {"id": client.id, "node_id": client.node_id, "node": client.node.name, "email": client.email, "comment": client.comment, "enabled": client.enabled, "managed_mode": client.managed_mode, "inbounds": [{"id": i.id, "remote_id": i.remote_id, "remark": i.remark} for i in client.inbounds], "used_bytes": used, "upload_bytes": client.upload_bytes, "download_bytes": client.download_bytes, "quota_bytes": quota, "percentage": round(used * 100 / quota, 2) if quota else None, "policy": effective.policy.name if effective.policy else None, "policy_source": effective.source, "policy_conflict": effective.conflict, "native_reset_conflict": client.remote_reset_mode.lower() not in {"", "0", "disabled", "none"} and bool(effective.policy and effective.policy.reset_enabled), "remote_missing": client.remote_missing, "last_synced_at": client.last_synced_at}
+    return {"id": client.id, "node_id": client.node_id, "node": client.node.name, "email": client.email, "comment": client.comment, "enabled": client.enabled, "managed_mode": client.managed_mode, "inbounds": [{"id": i.id, "remote_id": i.remote_id, "remark": i.remark} for i in client.inbounds], "used_bytes": used, "upload_bytes": client.upload_bytes, "download_bytes": client.download_bytes, "quota_bytes": quota, "percentage": round(used * 100 / quota, 2) if quota else None, "policy": effective.policy.name if effective.policy else None, "policy_source": effective.source, "policy_conflict": effective.conflict, "native_reset_conflict": client.remote_reset_mode.lower() not in {"", "0", "disabled", "none"} and bool(effective.policy and effective.policy.reset_enabled), "remote_missing": client.remote_missing, "last_synced_at": utc_json(client.last_synced_at)}
 
 
 @app.get("/health")
@@ -332,7 +338,7 @@ def reset_client(client_id: int, background: BackgroundTasks, db: Db, _admin: Ad
 
 def policy_json(db: Session, policy: Policy) -> dict:
     node_ids = db.scalars(select(PolicyAssignment.scope_id).where(PolicyAssignment.policy_id == policy.id, PolicyAssignment.scope_type == "NODE")).all()
-    return {"id": policy.id, "name": policy.name, "description": policy.description, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "missing_day_policy": policy.missing_day_policy, "catchup_enabled": policy.catchup_enabled, "catchup_max_hours": policy.catchup_max_hours, "reactivate_mode": policy.reactivate_mode, "enabled": policy.enabled, "next_run_at": policy.next_run_at, "node_ids": node_ids}
+    return {"id": policy.id, "name": policy.name, "description": policy.description, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "missing_day_policy": policy.missing_day_policy, "catchup_enabled": policy.catchup_enabled, "catchup_max_hours": policy.catchup_max_hours, "reactivate_mode": policy.reactivate_mode, "enabled": policy.enabled, "next_run_at": utc_json(policy.next_run_at), "node_ids": node_ids}
 
 
 @app.get("/api/policies")
@@ -410,7 +416,7 @@ def assign_policy(policy_id: int, body: dict, db: Db, _admin: AdminDep):
 
 
 def job_json(job: JobRun, detail: bool = False) -> dict:
-    result = {"id": job.id, "type": job.type, "source": job.source, "policy_id": job.policy_id, "cycle_key": job.cycle_key, "status": job.status, "created_at": job.created_at, "started_at": job.started_at, "finished_at": job.finished_at, "total_targets": job.total_targets, "success_count": job.success_count, "failure_count": job.failure_count, "summary": job.summary}
+    result = {"id": job.id, "type": job.type, "source": job.source, "policy_id": job.policy_id, "cycle_key": job.cycle_key, "status": job.status, "created_at": utc_json(job.created_at), "started_at": utc_json(job.started_at), "finished_at": utc_json(job.finished_at), "total_targets": job.total_targets, "success_count": job.success_count, "failure_count": job.failure_count, "summary": job.summary}
     if detail:
         result["items"] = [{"id": i.id, "node_id": i.node_id, "client_id": i.client_id, "status": i.status, "attempt_count": i.attempt_count, "error": i.error, "before": {"quota": i.before_quota, "up": i.before_up, "down": i.before_down}, "after": {"quota": i.after_quota, "up": i.after_up, "down": i.after_down}} for i in job.items]
     return result
@@ -443,7 +449,7 @@ def retry_job(job_id: int, background: BackgroundTasks, db: Db, _admin: AdminDep
 @app.get("/api/audit")
 def list_audit(db: Db, _admin: AdminDep):
     rows = db.scalars(select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(500)).all()
-    return [{"id": r.id, "timestamp": r.timestamp, "actor": r.actor, "source": r.source, "action": r.action, "scope": r.scope, "target": r.target, "before": r.before_json, "after": r.after_json, "result": r.result, "job_id": r.job_id} for r in rows]
+    return [{"id": r.id, "timestamp": utc_json(r.timestamp), "actor": r.actor, "source": r.source, "action": r.action, "scope": r.scope, "target": r.target, "before": r.before_json, "after": r.after_json, "result": r.result, "job_id": r.job_id} for r in rows]
 
 
 @app.get("/api/settings")
