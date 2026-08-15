@@ -330,13 +330,14 @@ def reset_client(client_id: int, background: BackgroundTasks, db: Db, _admin: Ad
     return {"job_id": job.id}
 
 
-def policy_json(policy: Policy) -> dict:
-    return {"id": policy.id, "name": policy.name, "description": policy.description, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "missing_day_policy": policy.missing_day_policy, "catchup_enabled": policy.catchup_enabled, "catchup_max_hours": policy.catchup_max_hours, "reactivate_mode": policy.reactivate_mode, "enabled": policy.enabled, "next_run_at": policy.next_run_at}
+def policy_json(db: Session, policy: Policy) -> dict:
+    node_ids = db.scalars(select(PolicyAssignment.scope_id).where(PolicyAssignment.policy_id == policy.id, PolicyAssignment.scope_type == "NODE")).all()
+    return {"id": policy.id, "name": policy.name, "description": policy.description, "quota_bytes": policy.quota_bytes, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "missing_day_policy": policy.missing_day_policy, "catchup_enabled": policy.catchup_enabled, "catchup_max_hours": policy.catchup_max_hours, "reactivate_mode": policy.reactivate_mode, "enabled": policy.enabled, "next_run_at": policy.next_run_at, "node_ids": node_ids}
 
 
 @app.get("/api/policies")
 def list_policies(db: Db, _admin: AdminDep):
-    return [policy_json(p) for p in db.scalars(select(Policy).order_by(Policy.name)).all()]
+    return [policy_json(db, p) for p in db.scalars(select(Policy).order_by(Policy.name)).all()]
 
 
 @app.post("/api/policies", status_code=201, dependencies=[Depends(require_csrf)])
@@ -348,7 +349,7 @@ def add_policy(body: PolicyInput, db: Db, admin: AdminDep):
     db.flush()
     audit(db, "CREATE_POLICY", "POLICY", policy.name, "SUCCESS", source="MANUAL", actor=admin.username)
     db.commit()
-    return policy_json(policy)
+    return policy_json(db, policy)
 
 
 @app.put("/api/policies/{policy_id}", dependencies=[Depends(require_csrf)])
@@ -361,7 +362,35 @@ def update_policy(policy_id: int, body: PolicyInput, db: Db, admin: AdminDep):
     policy.next_run_at = next_occurrence(utcnow(), policy.monthly_day, policy.local_time, policy.timezone, policy.missing_day_policy) if policy.enabled and policy.reset_enabled else None
     audit(db, "UPDATE_POLICY", "POLICY", policy.name, "SUCCESS", source="MANUAL", actor=admin.username)
     db.commit()
-    return policy_json(policy)
+    return policy_json(db, policy)
+
+
+class NodeAssignments(BaseModel):
+    node_ids: list[int] = []
+
+
+@app.put("/api/policies/{policy_id}/node-assignments", dependencies=[Depends(require_csrf)])
+def replace_node_assignments(policy_id: int, body: NodeAssignments, db: Db, admin: AdminDep):
+    policy = db.get(Policy, policy_id)
+    if not policy:
+        raise HTTPException(404, "Policy not found")
+    requested = set(body.node_ids)
+    found = set(db.scalars(select(Node.id).where(Node.id.in_(requested))).all()) if requested else set()
+    if missing := sorted(requested - found):
+        raise HTTPException(404, {"code": "NODE_NOT_FOUND", "message": "One or more nodes do not exist", "node_ids": missing})
+    current = db.scalars(select(PolicyAssignment).where(PolicyAssignment.scope_type == "NODE", PolicyAssignment.policy_id == policy.id)).all()
+    for assignment in current:
+        if assignment.scope_id not in requested:
+            db.delete(assignment)
+    for node_id in requested:
+        assignment = db.scalar(select(PolicyAssignment).where(PolicyAssignment.scope_type == "NODE", PolicyAssignment.scope_id == node_id))
+        if assignment:
+            assignment.policy_id = policy.id
+        else:
+            db.add(PolicyAssignment(policy_id=policy.id, scope_type="NODE", scope_id=node_id))
+    audit(db, "ASSIGN_POLICY_NODES", "POLICY", policy.name, "SUCCESS", source="MANUAL", actor=admin.username, after={"node_ids": sorted(requested)})
+    db.commit()
+    return policy_json(db, policy)
 
 
 @app.post("/api/policies/{policy_id}/assign", dependencies=[Depends(require_csrf)])

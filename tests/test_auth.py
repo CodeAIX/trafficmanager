@@ -3,7 +3,7 @@ from sqlalchemy import delete
 
 from backend.app.database import Base, SessionLocal, engine
 from backend.app.main import app
-from backend.app.models import Admin, Client, Node, WebSession
+from backend.app.models import Admin, Client, Node, Policy, WebSession
 
 
 def test_setup_session_is_recognized_by_auth_status():
@@ -47,3 +47,20 @@ def test_setup_session_is_recognized_by_auth_status():
         preview = client.post("/api/clients/reset-preview", headers=headers, json={"client_ids": [observed_id]})
         assert preview.status_code == 200
         assert preview.json()["clients"] == 1
+
+        with SessionLocal() as db:
+            policy = Policy(name="monthly", quota_bytes=1000)
+            db.add(policy)
+            db.commit()
+            policy_id = policy.id
+
+        assigned = client.put(
+            f"/api/policies/{policy_id}/node-assignments",
+            headers=headers,
+            json={"node_ids": [node.id]},
+        )
+        assert assigned.status_code == 200
+        assert assigned.json()["node_ids"] == [node.id]
+        policies = client.get("/api/policies")
+        assert policies.status_code == 200
+        assert policies.json()[0]["node_ids"] == [node.id]
