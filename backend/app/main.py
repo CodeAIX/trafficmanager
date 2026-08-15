@@ -135,11 +135,11 @@ def health(db: Db):
 
 
 @app.get("/auth/status")
-def auth_status(db: Db, fleet_session: str | None = Cookie(default=None)):
+def auth_status(db: Db, trafficmanager_session: str | None = Cookie(default=None)):
     initialized = bool(db.scalar(select(func.count()).select_from(Admin)))
     authenticated, csrf = False, None
-    if fleet_session:
-        session = db.get(WebSession, session_hash(fleet_session))
+    if trafficmanager_session:
+        session = db.get(WebSession, session_hash(trafficmanager_session))
         authenticated = bool(session and session.expires_at.replace(tzinfo=timezone.utc) > utcnow())
         csrf = session.csrf_token if authenticated else None
     return {"initialized": initialized, "authenticated": authenticated, "csrfToken": csrf}
