@@ -15,6 +15,7 @@ import {
   Layout,
   Menu,
   Modal,
+  Popconfirm,
   Select,
   Space,
   Statistic,
@@ -347,7 +348,7 @@ function Clients() {
       dataSource={data}
       scroll={{ x: 1680 }}
       columns={[
-        { title: '备注', dataIndex: 'local_remark', width: 150, fixed: 'left', sorter: textSorter('local_remark'), render: (value, row: any) => <Input key={`${row.id}:${value || ''}`} defaultValue={value} maxLength={255} placeholder="原始节点/用途" onPressEnter={event => event.currentTarget.blur()} onBlur={event => saveRemark(row, event.target.value)} /> },
+        { title: '备注', dataIndex: 'local_remark', width: 150, fixed: 'left', defaultSortOrder: 'ascend', sorter: (left, right) => compareText(left.local_remark, right.local_remark) || compareText(left.email, right.email), render: (value, row: any) => <Input key={`${row.id}:${value || ''}`} defaultValue={value} maxLength={255} placeholder="原始节点/用途" onPressEnter={event => event.currentTarget.blur()} onBlur={event => saveRemark(row, event.target.value)} /> },
         { title: '节点', dataIndex: 'node', sorter: textSorter('node') },
         { title: '邮箱标识', dataIndex: 'email', sorter: textSorter('email') },
         { title: '入站', dataIndex: 'inbounds', sorter: (left, right) => compareText(left.inbounds?.map((item: any) => item.remark).join('、'), right.inbounds?.map((item: any) => item.remark).join('、')), render: value => value.map((item: any) => item.remark || item.remote_id).join('、') },
@@ -483,6 +484,15 @@ function Policies() {
       setEditLoading(false)
     }
   }
+  const removePolicy = async (policy: any) => {
+    try {
+      await api(`/api/policies/${policy.id}`, { method: 'DELETE' })
+      message.success(`策略“${policy.name}”已删除`)
+      await Promise.all([qc.invalidateQueries({ queryKey: ['policies'] }), qc.invalidateQueries({ queryKey: ['clients'] }), qc.invalidateQueries({ queryKey: ['audit'] })])
+    } catch (error) {
+      message.error(`策略删除失败：${errorText(error)}`)
+    }
+  }
   const nodeNames = new Map(nodes.map((node: any) => [node.id, node.name]))
   return <>
     <Space className="heading"><Typography.Title level={2}>策略</Typography.Title><Button type="primary" onClick={() => setOpen(true)}>创建策略</Button></Space>
@@ -494,7 +504,7 @@ function Policies() {
       { title: '分配范围', sorter: (left, right) => (left.node_ids?.length + left.client_ids?.length) - (right.node_ids?.length + right.client_ids?.length), render: (_, row: any) => <Space direction="vertical" size={0}>{row.node_ids?.length ? <span>节点：{row.node_ids.map((id: number) => nodeNames.get(id) || `#${id}`).join('、')}</span> : null}{row.client_ids?.length ? <span>客户端：{row.client_ids.length} 个</span> : null}{!row.node_ids?.length && !row.client_ids?.length ? <span>未分配</span> : null}</Space> },
       { title: '下次执行', dataIndex: 'next_run_at', sorter: dateSorter('next_run_at'), render: value => value ? new Date(value).toLocaleString('zh-CN') : '—' },
       { title: '启用', dataIndex: 'enabled', sorter: (left, right) => Number(left.enabled) - Number(right.enabled), render: value => value ? <Tag color="green">是</Tag> : <Tag>否</Tag> },
-      { title: '操作', render: (_, row: any) => <Space><Button onClick={() => openEdit(row)}>编辑</Button>{row.description?.startsWith('trafficmanager:client:') ? <Typography.Text type="secondary">客户端专属</Typography.Text> : <Button onClick={() => { setAssigning(row); setAssignedNodeIds(row.node_ids || []) }}>分配节点</Button>}</Space> },
+      { title: '操作', render: (_, row: any) => <Space><Button onClick={() => openEdit(row)}>编辑</Button>{row.description?.startsWith('trafficmanager:client:') ? <Typography.Text type="secondary">客户端专属</Typography.Text> : <Button onClick={() => { setAssigning(row); setAssignedNodeIds(row.node_ids || []) }}>分配节点</Button>}<Popconfirm title="删除策略" description={row.assignment_count ? '该策略仍有分配关系，无法删除。' : `确定删除“${row.name}”吗？`} okText="删除" cancelText="取消" okButtonProps={{ danger: true }} disabled={Boolean(row.assignment_count)} onConfirm={() => removePolicy(row)}><Button danger disabled={Boolean(row.assignment_count)}>删除</Button></Popconfirm></Space> },
     ]} />
     <Modal title="创建策略" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="创建" cancelText="取消">
       <Form form={form} layout="vertical" onFinish={create}>
@@ -584,7 +594,7 @@ function Audit() {
 
 function Settings() {
   const { data = {} } = useQuery({ queryKey: ['settings'], queryFn: () => api('/api/settings') })
-  return <><Typography.Title level={2}>设置</Typography.Title><Card><Typography.Title level={4}>常规与任务</Typography.Title><p>同步间隔：{data.sync_interval_minutes} 分钟</p><p>界面时区：{data.default_ui_timezone}</p><p>并发数：全局 {data.global_concurrency} / 每节点 {data.per_node_concurrency}</p><p>网络重试：{data.network_retries} 次；验证重试：{data.verify_retries} 次</p><Button href="/api/settings/backup">下载数据库备份</Button></Card></>
+  return <><Typography.Title level={2}>设置</Typography.Title><Card><Typography.Title level={4}>TrafficManager {data.version || '1.0.0'}</Typography.Title><p>同步间隔：{data.sync_interval_minutes} 分钟</p><p>界面时区：{data.default_ui_timezone}</p><p>并发数：全局 {data.global_concurrency} / 每节点 {data.per_node_concurrency}</p><p>网络重试：{data.network_retries} 次；验证重试：{data.verify_retries} 次</p><Button href="/api/settings/backup">下载数据库备份</Button></Card></>
 }
 
 const entries = [['/', '仪表盘'], ['/nodes', '节点'], ['/clients', '客户端'], ['/policies', '策略'], ['/jobs', '任务'], ['/audit', '审计日志'], ['/settings', '设置']]

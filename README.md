@@ -1,4 +1,4 @@
-# TrafficManager
+# TrafficManager 1.0.0
 
 Centralized traffic policy and monthly reset management for multiple independent 3x-ui nodes. TrafficManager talks only to each node's authenticated HTTPS REST API; it never uses SSH, opens a remote SQLite database, or runs Xray.
 
@@ -12,7 +12,7 @@ Browser → FastAPI + React + Scheduler → Bearer HTTPS API → 3x-ui nodes
               /data/app.db
 ```
 
-V1 deliberately uses one Uvicorn worker and supports only one application replica. Multiple replicas would run multiple schedulers; HA requires a future distributed lock and PostgreSQL.
+The current deployment uses one Uvicorn worker and supports only one application replica. Multiple replicas would run multiple schedulers; HA requires a future distributed lock and PostgreSQL.
 
 ## Quick start
 
@@ -229,7 +229,7 @@ The mock 3x-ui app covers bearer authentication, OpenAPI discovery, large counte
 - **`sqlite3.OperationalError: unable to open database file`:** pull the latest image and recreate the container. Current images automatically repair ownership of the dedicated `/data` mount before dropping to the unprivileged `fleet` user; do not use `chmod 777`.
 - **Duplicate monthly run:** inspect Jobs; the database uniqueness constraint rejects a second job for the same policy cycle.
 
-## Known V1 limitations
+## Known limitations
 
 Single administrator, SQLite, one process/replica, no notifications, no traffic time-series, no remote client creation/deletion, and no automatic 3x-ui upgrade. Inbound aggregate reset is intentionally separate from monthly client reset. The UI is desktop-first but responsive.
 

@@ -10,7 +10,7 @@ from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, Header, HTTPExcep
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from .adapters.threexui import AdapterError, normalize_base_url
@@ -275,7 +275,7 @@ def list_clients(db: Db, _admin: AdminDep, search: str | None = None, node_id: i
         query = query.where(Client.node_id == node_id)
     if managed_mode:
         query = query.where(Client.managed_mode == managed_mode.upper())
-    return [client_json(db, c) for c in db.scalars(query.order_by(Client.email)).unique().all()]
+    return [client_json(db, c) for c in db.scalars(query.order_by(Client.local_remark, Client.email)).unique().all()]
 
 
 @app.patch("/api/clients/{client_id}", dependencies=[Depends(require_csrf)])
@@ -408,9 +408,10 @@ def reset_client(client_id: int, background: BackgroundTasks, db: Db, _admin: Ad
 
 
 def policy_json(db: Session, policy: Policy) -> dict:
-    node_ids = db.scalars(select(PolicyAssignment.scope_id).where(PolicyAssignment.policy_id == policy.id, PolicyAssignment.scope_type == "NODE")).all()
-    client_ids = db.scalars(select(PolicyAssignment.scope_id).where(PolicyAssignment.policy_id == policy.id, PolicyAssignment.scope_type == "CLIENT")).all()
-    return {"id": policy.id, "name": policy.name, "description": policy.description, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "missing_day_policy": policy.missing_day_policy, "catchup_enabled": policy.catchup_enabled, "catchup_max_hours": policy.catchup_max_hours, "reactivate_mode": policy.reactivate_mode, "enabled": policy.enabled, "next_run_at": utc_json(policy.next_run_at), "node_ids": node_ids, "client_ids": client_ids}
+    assignments = db.scalars(select(PolicyAssignment).where(PolicyAssignment.policy_id == policy.id)).all()
+    node_ids = [assignment.scope_id for assignment in assignments if assignment.scope_type == "NODE"]
+    client_ids = [assignment.scope_id for assignment in assignments if assignment.scope_type == "CLIENT"]
+    return {"id": policy.id, "name": policy.name, "description": policy.description, "reset_enabled": policy.reset_enabled, "monthly_day": policy.monthly_day, "local_time": policy.local_time.strftime("%H:%M"), "timezone": policy.timezone, "missing_day_policy": policy.missing_day_policy, "catchup_enabled": policy.catchup_enabled, "catchup_max_hours": policy.catchup_max_hours, "reactivate_mode": policy.reactivate_mode, "enabled": policy.enabled, "next_run_at": utc_json(policy.next_run_at), "node_ids": node_ids, "client_ids": client_ids, "assignment_count": len(assignments)}
 
 
 @app.get("/api/policies")
@@ -452,6 +453,25 @@ def update_policy(policy_id: int, body: PolicyInput, db: Db, admin: AdminDep):
     audit(db, "UPDATE_POLICY", "POLICY", policy.name, "SUCCESS", source="MANUAL", actor=admin.username, before=before, after=after)
     db.commit()
     return policy_json(db, policy)
+
+
+@app.delete("/api/policies/{policy_id}", dependencies=[Depends(require_csrf)])
+def delete_policy(policy_id: int, db: Db, admin: AdminDep):
+    policy = db.get(Policy, policy_id)
+    if not policy:
+        raise HTTPException(404, "Policy not found")
+    assignments = db.scalars(select(PolicyAssignment).where(PolicyAssignment.policy_id == policy.id)).all()
+    if assignments:
+        scopes = sorted({assignment.scope_type for assignment in assignments})
+        raise HTTPException(409, {"code": "POLICY_IN_USE", "message": "Policy is still assigned and cannot be deleted", "scopes": scopes})
+    active_job = db.scalar(select(JobRun).where(JobRun.policy_id == policy.id, JobRun.status.in_(["PENDING", "RUNNING"])))
+    if active_job:
+        raise HTTPException(409, {"code": "POLICY_JOB_ACTIVE", "message": "Policy has an active job and cannot be deleted"})
+    db.execute(update(JobRun).where(JobRun.policy_id == policy.id).values(policy_id=None))
+    audit(db, "DELETE_POLICY", "POLICY", policy.name, "SUCCESS", source="MANUAL", actor=admin.username)
+    db.delete(policy)
+    db.commit()
+    return {"ok": True}
 
 
 class NodeAssignments(BaseModel):
@@ -537,7 +557,7 @@ def list_audit(db: Db, _admin: AdminDep):
 
 @app.get("/api/settings")
 def get_settings(_admin: AdminDep):
-    return {"sync_interval_minutes": settings.sync_interval_minutes, "default_ui_timezone": settings.app_timezone, "global_concurrency": settings.global_concurrency, "per_node_concurrency": settings.per_node_concurrency, "network_retries": settings.network_retries, "verify_retries": settings.verify_retries, "session_timeout_minutes": settings.session_timeout_minutes}
+    return {"version": app.version, "sync_interval_minutes": settings.sync_interval_minutes, "default_ui_timezone": settings.app_timezone, "global_concurrency": settings.global_concurrency, "per_node_concurrency": settings.per_node_concurrency, "network_retries": settings.network_retries, "verify_retries": settings.verify_retries, "session_timeout_minutes": settings.session_timeout_minutes}
 
 
 @app.get("/api/settings/backup")

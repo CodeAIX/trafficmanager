@@ -30,10 +30,15 @@ def test_setup_session_is_recognized_by_auth_status():
 
         with SessionLocal() as db:
             node = Node(name="test-node", base_url="https://node.example", token_ciphertext=b"encrypted", token_nonce=b"nonce")
-            observed = Client(node=node, email="observed@example.com", managed_mode="OBSERVE", quota_remote_bytes=4096)
-            db.add_all([node, observed])
+            observed = Client(node=node, email="observed@example.com", local_remark="Zulu", managed_mode="OBSERVE", quota_remote_bytes=4096)
+            alphabetic = Client(node=node, email="alphabetic@example.com", local_remark="Alpha", managed_mode="OBSERVE")
+            db.add_all([node, observed, alphabetic])
             db.commit()
             observed_id = observed.id
+
+        ordered_clients = client.get("/api/clients")
+        assert ordered_clients.status_code == 200
+        assert [item["local_remark"] for item in ordered_clients.json()[:2]] == ["Alpha", "Zulu"]
 
         headers = {"X-CSRF-Token": setup.json()["csrfToken"]}
         blocked = client.post("/api/clients/reset-preview", headers=headers, json={"client_ids": [observed_id]})
@@ -61,6 +66,9 @@ def test_setup_session_is_recognized_by_auth_status():
         )
         assert assigned.status_code == 200
         assert assigned.json()["node_ids"] == [node.id]
+        in_use = client.delete(f"/api/policies/{policy_id}", headers=headers)
+        assert in_use.status_code == 409
+        assert in_use.json()["detail"]["code"] == "POLICY_IN_USE"
         policies = client.get("/api/policies")
         assert policies.status_code == 200
         assert policies.json()[0]["node_ids"] == [node.id]
@@ -103,7 +111,8 @@ def test_setup_session_is_recognized_by_auth_status():
             },
         )
         assert dedicated.status_code == 200
-        assert dedicated.json()["assigned_policy_id"] != policy_id
+        dedicated_policy_id = dedicated.json()["assigned_policy_id"]
+        assert dedicated_policy_id != policy_id
         assert "quota_bytes" not in dedicated.json()["policy_config"]
         assert dedicated.json()["quota_bytes"] == 4096
         assert dedicated.json()["policy_config"]["monthly_day"] == 15
@@ -117,3 +126,12 @@ def test_setup_session_is_recognized_by_auth_status():
         assert inherited.status_code == 200
         assert inherited.json()["assigned_policy_id"] is None
         assert inherited.json()["policy_source"] == "NODE"
+
+        deleted = client.delete(f"/api/policies/{dedicated_policy_id}", headers=headers)
+        assert deleted.status_code == 200
+        assert deleted.json() == {"ok": True}
+        assert dedicated_policy_id not in {item["id"] for item in client.get("/api/policies").json()}
+
+        settings = client.get("/api/settings")
+        assert settings.status_code == 200
+        assert settings.json()["version"] == "1.0.0"
