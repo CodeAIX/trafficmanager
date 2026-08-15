@@ -280,18 +280,39 @@ class JobRequest(BaseModel):
     start_new_cycle: bool = False
 
 
+def require_managed_clients(db: Session, client_ids: list[int]) -> list[Client]:
+    requested_ids = set(client_ids)
+    if not requested_ids:
+        raise HTTPException(422, {"code": "NO_CLIENTS_SELECTED", "message": "Select at least one client"})
+    clients = db.scalars(select(Client).where(Client.id.in_(requested_ids))).all()
+    found_ids = {client.id for client in clients}
+    missing_ids = sorted(requested_ids - found_ids)
+    if missing_ids:
+        raise HTTPException(404, {"code": "CLIENT_NOT_FOUND", "message": "One or more selected clients no longer exist", "client_ids": missing_ids})
+    blocked = [client for client in clients if client.managed_mode != "MANAGED" or client.remote_missing]
+    if blocked:
+        raise HTTPException(409, {
+            "code": "CLIENT_NOT_MANAGED",
+            "message": "Only Managed clients can be reset. Change Mode to MANAGED first.",
+            "clients": [{"id": client.id, "email": client.email, "mode": client.managed_mode} for client in blocked],
+        })
+    return clients
+
+
 @app.post("/api/clients/reset-preview", dependencies=[Depends(require_csrf)])
 def reset_preview(body: JobRequest, db: Db, _admin: AdminDep):
-    clients = db.scalars(select(Client).where(Client.id.in_(body.client_ids), Client.managed_mode == "MANAGED")).all()
+    clients = require_managed_clients(db, body.client_ids)
     return {"nodes": len({c.node_id for c in clients}), "inbounds": len({i.id for c in clients for i in c.inbounds}), "clients": len(clients), "quota_change": body.start_new_cycle, "inbound_aggregate_counters": False}
 
 
 @app.post("/api/clients/bulk-reset", status_code=202, dependencies=[Depends(require_csrf)])
 def bulk_reset(body: JobRequest, background: BackgroundTasks, db: Db, admin: AdminDep):
-    query = select(Client).where(Client.managed_mode == "MANAGED", Client.remote_missing.is_(False))
     if body.client_ids:
-        query = query.where(Client.id.in_(body.client_ids))
-    clients = db.scalars(query).all()
+        clients = require_managed_clients(db, body.client_ids)
+    else:
+        clients = db.scalars(select(Client).where(Client.managed_mode == "MANAGED", Client.remote_missing.is_(False))).all()
+        if not clients:
+            raise HTTPException(409, {"code": "NO_MANAGED_CLIENTS", "message": "No Managed clients are available to reset"})
     job = create_job(db, "MONTHLY_CYCLE" if body.start_new_cycle else "RESET_TRAFFIC", "MANUAL", [c.id for c in clients])
     audit(db, "CREATE_JOB", "JOB", str(job.id), "PENDING", source="MANUAL", actor=admin.username, job_id=job.id)
     db.commit()

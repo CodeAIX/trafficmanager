@@ -3,7 +3,7 @@ from sqlalchemy import delete
 
 from backend.app.database import Base, SessionLocal, engine
 from backend.app.main import app
-from backend.app.models import Admin, WebSession
+from backend.app.models import Admin, Client, Node, WebSession
 
 
 def test_setup_session_is_recognized_by_auth_status():
@@ -27,3 +27,23 @@ def test_setup_session_is_recognized_by_auth_status():
         assert status.json()["authenticated"] is True
         assert status.json()["csrfToken"] == setup.json()["csrfToken"]
         assert client.get("/api/dashboard").status_code == 200
+
+        with SessionLocal() as db:
+            node = Node(name="test-node", base_url="https://node.example", token_ciphertext=b"encrypted", token_nonce=b"nonce")
+            observed = Client(node=node, email="observed@example.com", managed_mode="OBSERVE")
+            db.add_all([node, observed])
+            db.commit()
+            observed_id = observed.id
+
+        headers = {"X-CSRF-Token": setup.json()["csrfToken"]}
+        blocked = client.post("/api/clients/reset-preview", headers=headers, json={"client_ids": [observed_id]})
+        assert blocked.status_code == 409
+        assert blocked.json()["detail"]["code"] == "CLIENT_NOT_MANAGED"
+
+        with SessionLocal() as db:
+            db.get(Client, observed_id).managed_mode = "MANAGED"
+            db.commit()
+
+        preview = client.post("/api/clients/reset-preview", headers=headers, json={"client_ids": [observed_id]})
+        assert preview.status_code == 200
+        assert preview.json()["clients"] == 1
