@@ -67,6 +67,8 @@ docker run -d \
   ghcr.io/codeaix/trafficmanager:latest
 ```
 
+容器入口只在启动时使用 root 修正专用 `/data` 挂载目录的所有权，随后立即降权为 `fleet` 用户运行数据库迁移和应用。因此由宿主机 root 创建的 `./data` 可直接挂载，不需要执行 `chmod 777`。
+
 打开 `http://服务器IP:2083` 创建首个管理员，然后进入 **Nodes → Add node** 添加 3x-ui 节点。Base URL 必须保留 3x-ui 的 WebBasePath，例如 `https://host:2053/abcdef`。
 
 查看状态与日志：
@@ -218,6 +220,7 @@ The mock 3x-ui app covers bearer authentication, OpenAPI discovery, large counte
 - **Node offline/stale:** verify DNS, port, WebBasePath, TLS trust, and outbound access from the container. Last known state is retained.
 - **Saved tokens cannot decrypt:** restore the original master key. Ciphertext cannot be recovered without it.
 - **Container unhealthy:** run `docker logs trafficmanager` and `curl http://127.0.0.1:2083/health`; also verify `/data` is writable by the container.
+- **`sqlite3.OperationalError: unable to open database file`:** pull the latest image and recreate the container. Current images automatically repair ownership of the dedicated `/data` mount before dropping to the unprivileged `fleet` user; do not use `chmod 777`.
 - **Duplicate monthly run:** inspect Jobs; the database uniqueness constraint rejects a second job for the same policy cycle.
 
 ## Known V1 limitations
